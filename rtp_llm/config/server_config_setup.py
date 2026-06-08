@@ -291,18 +291,9 @@ def set_parallelism_config(
         parallelism_config.prefill_cp_config.kv_cache_sharded = (
             py_prefill_cp_config.kv_cache_sharded
         )
-        if hasattr(py_prefill_cp_config, "prefill_cp_size") and hasattr(
-            parallelism_config.prefill_cp_config, "prefill_cp_size"
-        ):
-            parallelism_config.prefill_cp_config.prefill_cp_size = (
-                py_prefill_cp_config.prefill_cp_size
-            )
-        elif py_prefill_cp_config.kv_cache_sharded:
-            logging.warning(
-                "PREFILL_CP_SIZE is not available in this rtp_llm.ops build; "
-                "prefill_cp_kv_cache_sharded was enabled but explicit CP size "
-                "cannot be propagated."
-            )
+        parallelism_config.prefill_cp_config.prefill_cp_size = (
+            py_prefill_cp_config.prefill_cp_size
+        )
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )
@@ -311,8 +302,8 @@ def set_parallelism_config(
 def _infer_model_type(ckpt_path: str) -> Optional[str]:
     """Infer ``model_type`` by reading config.json from a local checkpoint directory.
 
-    ModelDict owns lightweight architecture / repo mappings, so this does not
-    import every model implementation during startup.
+    Importing ``rtp_llm.models`` triggers all ``register_model`` calls so that
+    the architecture / repo lookup tables are populated before we query them.
     """
     if not ckpt_path or not os.path.isdir(ckpt_path):
         return None
@@ -320,6 +311,8 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
     if not os.path.isfile(config_path):
         return None
     try:
+        import rtp_llm.models  # noqa: F401  — trigger model registrations
+
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         return ModelDict.get_ft_model_type_by_config(config)

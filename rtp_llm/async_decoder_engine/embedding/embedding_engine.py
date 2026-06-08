@@ -4,8 +4,9 @@ import logging
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.ops import RtpEmbeddingOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
+from rtp_llm.config.engine_config import EngineConfig
 
 
 class EmbeddingCppEngine(BaseEngine):
@@ -14,11 +15,6 @@ class EmbeddingCppEngine(BaseEngine):
         logging.info("creating cpp embedding engine")
         self.model = model
         self.engine_config = engine_config
-        from rtp_llm.ops import ensure_engine_ops_loaded
-
-        ensure_engine_ops_loaded()
-        from rtp_llm.ops import RtpEmbeddingOp
-
         self.cpp_engine = RtpEmbeddingOp()
 
     @override
@@ -31,6 +27,4 @@ class EmbeddingCppEngine(BaseEngine):
             self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
         else:
             self.mm_engine = None
-        self.cpp_engine.init(
-            self.model, self.engine_config, self.model.vit_config, self.mm_engine
-        )
+        self.cpp_engine.init(self.model, self.engine_config, self.model.vit_config, self.mm_engine)

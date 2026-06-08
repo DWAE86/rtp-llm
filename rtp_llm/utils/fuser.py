@@ -7,40 +7,31 @@ import threading
 import time
 from enum import Enum
 from subprocess import check_call
-from typing import Dict, Optional, Tuple, Type
+from typing import Dict, Optional
 from urllib.parse import urlparse
+
+import requests
+
+from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import HippoHelper
 
 
 class RetryableError(Exception):
     pass
 
 
-def _requests_module():
-    import requests
-
-    return requests
-
-
 def retry_with_timeout(
     timeout_seconds: int = 300,
     retry_interval: float = 1.0,
-    exceptions: Optional[Tuple[Type[BaseException], ...]] = None,
+    exceptions: tuple = (requests.exceptions.RequestException, RetryableError),
 ):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            retry_exceptions = exceptions
-            if retry_exceptions is None:
-                requests = _requests_module()
-                retry_exceptions = (
-                    requests.exceptions.RequestException,
-                    RetryableError,
-                )
             start_time = time.time()
             while True:
                 try:
                     return func(*args, **kwargs)
-                except retry_exceptions as e:
+                except exceptions as e:
                     elapsed_time = time.time() - start_time
                     if elapsed_time >= timeout_seconds:
                         raise TimeoutError(
@@ -66,10 +57,6 @@ class MountRwMode(Enum):
 # see documents at https://aliyuque.antfin.com/owt27z/ohohhg/xyardt2bwbyfmhn5
 class Fuser:
     def __init__(self) -> None:
-        from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import (
-            HippoHelper,
-        )
-
         if HippoHelper.host_fuse_port():
             self._fuse_uri = (
                 f"http://{HippoHelper.host_ip}:{HippoHelper.host_fuse_port()}"
@@ -88,7 +75,6 @@ class Fuser:
         return self._available
 
     def _check_valid(self) -> bool:
-        requests = _requests_module()
         try:
             response = requests.post(
                 f"{self._fuse_uri}/FuseService/mount",
@@ -139,11 +125,9 @@ class Fuser:
             )
 
         logging.info(f"mount request to {self._fuse_uri}/FuseService/mount: {req_json}")
-        mount_result = (
-            _requests_module()
-            .post(f"{self._fuse_uri}/FuseService/mount", json=req_json, timeout=600)
-            .json()
-        )
+        mount_result = requests.post(
+            f"{self._fuse_uri}/FuseService/mount", json=req_json, timeout=600
+        ).json()
         error_code = mount_result["errorCode"]
         if error_code != 0:
             raise RetryableError(f"mount {path} -> {mnt_path} failed: {mount_result}")
@@ -162,11 +146,9 @@ class Fuser:
 
     def _perform_umount(self, mnt_path: str) -> None:
         req_json = {"mountDir": mnt_path}
-        umount_result = (
-            _requests_module()
-            .post(f"{self._fuse_uri}/FuseService/umount", json=req_json, timeout=600)
-            .json()
-        )
+        umount_result = requests.post(
+            f"{self._fuse_uri}/FuseService/umount", json=req_json, timeout=600
+        ).json()
         error_code = umount_result["errorCode"]
         if error_code != 0:
             raise Exception(f"umount {mnt_path} failed: {umount_result}")
@@ -207,17 +189,7 @@ class Fuser:
                 self.umount_fuse_dir(mnt_path, force=force)
 
 
-_fuser: Optional[Fuser] = None
-_fuser_lock = threading.Lock()
-
-
-def _get_fuser() -> Fuser:
-    global _fuser
-    if _fuser is None:
-        with _fuser_lock:
-            if _fuser is None:
-                _fuser = Fuser()
-    return _fuser
+_fuser = Fuser()
 
 
 class MountInfo:
@@ -315,14 +287,14 @@ def fetch_remote_file_to_local(
         return _nfs_manager.mount_nfs_dir(path)
     else:
         logging.info(f"try fuse path {path}")
-        return _get_fuser().mount_dir(path, mount_mode, enable_mnt_ref)
+        return _fuser.mount_dir(path, mount_mode, enable_mnt_ref)
 
 
 def umount_file(path: str, force: bool = False):
     logging.info(f"umount file {path}")
-    _get_fuser().umount_fuse_dir(path, force=force)
+    _fuser.umount_fuse_dir(path, force=force)
     _nfs_manager.unmount_nfs_path(path)
 
 
 def fuse_available() -> bool:
-    return _get_fuser().available
+    return _fuser.available

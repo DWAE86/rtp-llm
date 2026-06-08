@@ -1,12 +1,13 @@
 """FlexLB schedule client: request role addrs from master/slave and parse response."""
 
-from __future__ import annotations
-
 import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+import aiohttp
+from aiohttp import ClientTimeout
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
@@ -107,7 +108,7 @@ class MasterClient:
         )
         self.host_service: Optional[HostService] = host_service
         self.max_connect_pool_size = self.master_config.master_max_connect_pool_size
-        self._session: Optional[Any] = None
+        self._session: Optional[aiohttp.ClientSession] = None
         self.latest_queue_length: int = 0
         self.session_timeout_s = self._get_session_timeout_s()
 
@@ -128,10 +129,7 @@ class MasterClient:
             return 3600.0
         return DEFAULT_REQUEST_TIMEOUT_SEC
 
-    async def _get_session(self):
-        import aiohttp
-        from aiohttp import ClientTimeout
-
+    async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             timeout = ClientTimeout(total=self.session_timeout_s)
             connector = aiohttp.TCPConnector(
@@ -171,8 +169,6 @@ class MasterClient:
             generate_timeout_ms / 1000.0 if generate_timeout_ms > 0 else None
         )
         start = time.time()
-        import aiohttp
-        from aiohttp import ClientTimeout
 
         try:
             session = await self._get_session()

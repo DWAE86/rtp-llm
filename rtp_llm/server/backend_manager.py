@@ -2,9 +2,12 @@ import gc
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import Any, Dict, Optional, Union
+
+from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -13,9 +16,9 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.utils.concurrency_controller import get_global_controller
+from rtp_llm.utils.fuser import _nfs_manager
 
-if TYPE_CHECKING:
-    from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 USAGE_HEADER = "USAGE"
 
@@ -35,7 +38,7 @@ class BackendManager(object):
         # just rank 0 report metric
         if py_env_configs.parallelism_config.world_rank == 0:
             kmonitor.init()
-        self.engine: Optional["BaseEngine"] = None
+        self.engine: Optional[BaseEngine] = None
         self._shutdown_requested = threading.Event()
 
     def start(self):
@@ -136,15 +139,13 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
-        if self.engine is not None:
-            from rtp_llm.utils.fuser import _nfs_manager
-
+        if isinstance(self.engine, BaseEngine):
             _nfs_manager.unmount_all()
             logging.info("all nfs paths unmounted")
             self.engine.stop()
 
     def ready(self):
-        if self.engine is not None:
+        if isinstance(self.engine, BaseEngine):
             return self.engine.ready()
         return True
 
