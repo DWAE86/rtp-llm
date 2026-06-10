@@ -1,11 +1,13 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/StructuredOutputAdmissionPolicy.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorModules.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -51,6 +53,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
     runtime_config(params.runtime_config),
+    grammar_config_(params.grammar_config),
     eplb_config(params.eplb_config),
     pd_sep_config(params.pd_sep_config),
     profiling_debug_logging_config(params.profiling_debug_logging_config),
@@ -111,6 +114,17 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     // 此时checkpoint已加载完成，可以将glibc缓存的内存归还给操作系统
     releaseHostMemoryCache();
 
+    // Composition root: wire the structured-output logits-processor module once,
+    // through a single neutral entry. The engine stays backend-agnostic — it does
+    // not name GrammarCompiler / GrammarLogitsProcessor; the module installs its
+    // compile service and registers a pending-processor factory with
+    // LogitsProcessorFactory, so every structured-output stream gets a logits
+    // processor it resolves via prepare() while WAITING (mirrors KV-cache async
+    // load) rather than any scheduler gate. Every other downstream component
+    // (FIFOScheduler, GenerateStream, NormalExecutor, the MTP spec layer) reaches
+    // structured output only through the generic LogitsProcessorFactory /
+    // stream_logits_processor seams.
+    registerStructuredOutputLogitsProcessor(params.grammar_config);
     initScheduler();
     (void)startLoop();
 }
@@ -138,8 +152,10 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 
 void NormalEngine::initScheduler() {
     if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(new BatchDecodeScheduler(
-            runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
+        scheduler_.reset(new BatchDecodeScheduler(runtime_config,
+                                                  resource_context_.cache_manager,
+                                                  metrics_reporter_,
+                                                  parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else {
         scheduler_.reset(new FIFOScheduler(runtime_config,
@@ -148,7 +164,8 @@ void NormalEngine::initScheduler() {
                                            parallelism_config,
                                            model_specific_config,
                                            resource_context_.cache_manager,
-                                           metrics_reporter_));
+                                           metrics_reporter_,
+                                           1));
         RTP_LLM_LOG_INFO("create fifo scheduler done");
     }
 }
@@ -278,7 +295,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
     fake_input->fake_query                      = true;
-    auto stream                                 = makeStream(fake_input);
+    auto stream                                 = createStream(fake_input);
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
@@ -400,10 +417,35 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
+absl::Status NormalEngine::validateStructuredOutputAdmission(const std::shared_ptr<GenerateInput>& input) const {
+    if (!input) {
+        return absl::OkStatus();
+    }
+    const auto result = checkStructuredOutputAdmissionForConfig(
+        input->generate_config, grammar_config_, runtime_config.use_batch_decode_scheduler);
+    if (result.allowed) {
+        return absl::OkStatus();
+    }
+    return absl::InvalidArgumentError(result.message);
+}
+
+std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->initProcessorStreamRefs();
     return stream;
+}
+
+std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
+    if (auto status = validateStructuredOutputAdmission(input); !status.ok()) {
+        RTP_LLM_LOG_INFO("[structured_output_admission] rejected makeStream request %ld: %s",
+                         input ? input->request_id : -1,
+                         status.message().data());
+        auto stream = createStream(input);
+        stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, std::string(status.message()));
+        return stream;
+    }
+    return createStream(input);
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
@@ -412,8 +454,15 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    if (auto status = validateStructuredOutputAdmission(input); !status.ok()) {
+        RTP_LLM_LOG_INFO("[structured_output_admission] rejected enqueue request %ld: %s",
+                         input ? input->request_id : -1,
+                         status.message().data());
+        auto stream = createStream(input);
+        stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, std::string(status.message()));
+        return stream;
+    }
+    std::shared_ptr<GenerateStream> stream = createStream(input);
     stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
     return stream;
@@ -423,13 +472,27 @@ std::vector<std::shared_ptr<GenerateStream>>
 NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
     std::vector<std::shared_ptr<GenerateStream>> streams;
     streams.reserve(inputs.size());
+    std::vector<std::shared_ptr<GenerateStream>> to_enqueue;
+    to_enqueue.reserve(inputs.size());
     for (auto& inp : inputs) {
-        auto stream = std::make_shared<NormalGenerateStream>(
-            inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
-        stream->setReserveStep(reserve_step_);
-        streams.push_back(stream);
+        if (auto status = validateStructuredOutputAdmission(inp); !status.ok()) {
+            RTP_LLM_LOG_WARNING("[structured_output_admission] rejected batch enqueue request %ld: %s",
+                                inp ? inp->request_id : -1,
+                                status.message().data());
+            auto stream = createStream(inp);
+            stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, std::string(status.message()));
+            streams.push_back(std::move(stream));
+        } else {
+            auto stream = createStream(inp);
+            stream->setReserveStep(reserve_step_);
+            to_enqueue.push_back(stream);
+            streams.push_back(std::move(stream));
+        }
     }
-    return scheduler_->batchEnqueue(streams);
+    if (!to_enqueue.empty()) {
+        (void)scheduler_->batchEnqueue(to_enqueue);
+    }
+    return streams;
 }
 
 absl::Status NormalEngine::step() {

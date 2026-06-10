@@ -114,7 +114,10 @@ struct EngineInitParams {
     py::object                   py_eplb;
     py::object                   py_sp_model;
     py::object                   weight_manager;
-    kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+    // Grammar/structured-output config (empty tokenizer_info_json = disabled);
+    // tokenizer_info_json / think_end_id are populated by Python at engine start.
+    GrammarConfig                grammar_config;
+    kmonitor::MetricsReporterPtr metrics_reporter    = nullptr;
 
 public:
     void showDebugInfo() const {

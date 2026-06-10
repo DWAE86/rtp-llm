@@ -88,6 +88,11 @@ public:
     }
     virtual void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {}
 
+    // Reject incompatible structured-output requests before stream allocation.
+    virtual absl::Status validateStructuredOutputAdmission(const std::shared_ptr<GenerateInput>& input) const {
+        return absl::OkStatus();
+    }
+
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 
 protected:
@@ -95,8 +100,8 @@ protected:
     MlaOpsType                     mla_ops_type_       = MlaOpsType::AUTO;
     int32_t                        kv_cache_group_num_ = 1;
     std::vector<int32_t>           kv_cache_layer_to_group_;
-    std::unique_ptr<SchedulerBase> scheduler_ = nullptr;
-    bool                           pause_     = false;
+    std::unique_ptr<SchedulerBase> scheduler_                  = nullptr;
+    bool pause_ = false;
 };
 
 }  // namespace rtp_llm

@@ -47,8 +47,11 @@ public:
     bool updateEplbConfig(const EPLBConfig& config) override;
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
+    absl::Status validateStructuredOutputAdmission(const std::shared_ptr<GenerateInput>& input) const override;
+
 private:
     void                            initScheduler();
+    std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
@@ -73,6 +76,7 @@ private:
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
+    StructuredOutputConfig                        grammar_config_;
     EPLBConfig                                    eplb_config;
     PDSepConfig                                   pd_sep_config;
     ProfilingDebugLoggingConfig                   profiling_debug_logging_config;

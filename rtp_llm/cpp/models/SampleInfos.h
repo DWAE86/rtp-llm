@@ -1,8 +1,12 @@
 #pragma once
 
+#include <memory>
+#include <vector>
+
 #include <torch/all.h>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "rtp_llm/cpp/models/SpecLogitsProcessorTypes.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -11,6 +15,11 @@ class LogitsProcessorStates;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {};
+
+enum class LogitsProcessorPhase {
+    NORMAL_DECODE,
+    MTP_VERIFY,
+};
 
 struct SamplerInputs {
 public:
@@ -57,6 +66,15 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+
+    LogitsProcessorPhase phase = LogitsProcessorPhase::NORMAL_DECODE;
+
+    // MTP verify: bool vocab mask [batch * (propose_step + 1), vocab_size]; true = disallowed.
+    torch::Tensor                 spec_vocab_mask_gpu;
+    torch::Tensor                 spec_cap_gpu;
+    std::shared_ptr<torch::Event> spec_mask_ready_event;
+    std::vector<SpecLogitsProcessorId> spec_applied_processors;
+    int                                spec_propose_step = 0;
 };
 
 struct SamplerOutput {

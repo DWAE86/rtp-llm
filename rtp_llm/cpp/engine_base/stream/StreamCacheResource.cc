@@ -127,24 +127,15 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     }
 
     // Apply side-channel data to GenerateStream
-    // 1. First token: append to stream
+    // 1. First token: PREBUILT-style ingest (align with DecodeRpcServer::localGenerate).
+    // Do NOT call update() — that runs notifyCommit → checkTermination and can close
+    // grammar-constrained streams after the prefill-side T0 before decode samples.
     if (payload->first_token_id > 0) {
         stream->setIsContextStream(false);
         stream->step();
-        auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
-        new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
         stream->incLastOutputPos();
-        stream->update({.new_tokens        = new_tokens,
-                        .num_new_tokens    = 1,
-                        .hidden_states     = {},
-                        .logits            = {},
-                        .softmax_probs     = {},
-                        .cum_log_probs     = {},
-                        .all_probs         = {},
-                        .loss              = {},
-                        .src_batch_indices = {},
-                        .all_hidden_states = {}});
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
+        stream->ingestPdBonusToken(static_cast<int32_t>(payload->first_token_id));
+        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: ingested first_token_id=%ld via ingestPdBonusToken, stream_id=%ld",
                           payload->first_token_id,
                           stream->streamId());
     }
