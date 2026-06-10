@@ -1,0 +1,130 @@
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <ATen/ATen.h>
+#include <dlpack/dlpack.h>
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarCompiler.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/StreamGrammarState.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+
+namespace rtp_llm {
+
+class RtpGrammarMatcher;
+class GenerateStream;
+class GenerateInput;
+struct SamplerInputs;
+using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
+
+class GrammarLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
+public:
+    explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
+                                    GenerateStreamPtr                  stream = nullptr);
+
+    ~GrammarLogitsProcessor() override;
+
+    static BaseLogitsProcessorPtr tryCreatePending(const std::shared_ptr<GenerateInput>& input);
+
+    void         process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void         processSpeculative(const SamplerInputs&        inputs,
+                                    size_t                      start_idx,
+                                    size_t                      finish_idx,
+                                    const std::vector<int32_t>& draft_prefix) override;
+    void         updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    void         replayCommittedTokens(const std::vector<int32_t>& tokens) override;
+    void         finalizeAfterReplayIfComplete() override;
+    void         updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    bool         needsPreparation() const override;
+    PrepareState prepare(GenerateStream& stream) override;
+    void         setStream(const std::shared_ptr<GenerateStream>& stream) override { stream_ = stream; }
+
+    bool isStateful() const override { return true; }
+    bool supportsNormalAsyncDeviceState() const override { return true; }
+    void prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    int64_t acceptedTokenLen() const override;
+
+    bool isSpecVerifyEligible() const override;
+    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
+
+    RtpGrammarMatcher* grammarMatcher() const noexcept { return matcher_.get(); }
+    bool               isGrammarMatcherComplete() const noexcept {
+        return matcher_ && (matcher_->isTerminated() || matcher_->finished());
+    }
+    int previewCommitTokenCount(const std::vector<int32_t>& tokens);
+    bool matcherSynced() const noexcept { return matcher_synced_; }
+
+private:
+    GrammarLogitsProcessor() = default;
+
+    enum class DeviceMaskMode {
+        UNSET,
+        NOOP,
+        MASK,
+        PASSTHROUGH,
+        TERMINATED,
+        FINISHED,
+    };
+
+    struct DeviceMaskState {
+        DeviceMaskMode                mode      = DeviceMaskMode::UNSET;
+        int64_t                       token_len = -1;
+        c10::Device                   device    = c10::Device(c10::DeviceType::CPU);
+        torch::Tensor                 vocab_mask;
+        std::shared_ptr<torch::Event> ready_event;
+    };
+
+    enum class MatcherAdvance { Commit, ReplayOnly };
+    enum class Kind { FailFast, Compile };
+
+    DeviceMaskState getDeviceMaskState(const c10::Device& device);
+    DeviceMaskState buildDeviceMaskStateLocked(const c10::Device& device);
+    void            publishMaskToDevice(DeviceMaskState& state, torch::Tensor vocab_mask, const c10::Device& device);
+    void            applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state);
+    void            forceToken(const torch::Tensor& logits, int64_t token_id);
+    void            maskToken(const torch::Tensor& logits, int64_t token_id);
+    void            syncAcceptedTokenLenLocked();
+    void            rebuildDeviceMaskStateLocked();
+
+    void checkTermination();
+    bool ensureMatcherSynced();
+    bool advanceMatcher(const std::vector<int32_t>& tokens, MatcherAdvance mode, bool caller_holds_stream_lock = false);
+    void logGrammarLifecycle(const char* phase, const char* source, int64_t stream_id = -1) const;
+    void installMatcher(GenerateStream& stream, const GrammarReadyPayload& payload);
+
+    Kind        kind_      = Kind::Compile;
+    ErrorCode   fail_code_ = ErrorCode::INVALID_PARAMS;
+    std::string fail_msg_;
+
+    GrammarKeyCpp                           key_;
+    bool                                    require_reasoning_ = false;
+    std::shared_future<GrammarReadyPayload> future_;
+    std::chrono::steady_clock::time_point   deadline_;
+    bool                                    resolved_ = false;
+
+    std::shared_ptr<RtpGrammarMatcher> matcher_;
+    std::weak_ptr<GenerateStream>      stream_;
+    bool                               matcher_synced_ = false;
+    StreamGrammarState                 grammar_state_;
+
+    mutable std::mutex          state_mutex_;
+    std::condition_variable     state_cv_;
+    std::atomic_bool            reported_error_{false};
+    int64_t                     eos_token_id_              = 0;
+    int64_t                     accepted_token_len_          = 0;
+    int64_t                     pending_async_token_len_     = 0;
+    std::optional<c10::Device>  last_mask_device_;
+    DeviceMaskState             device_mask_state_;
+};
+
+}  // namespace rtp_llm

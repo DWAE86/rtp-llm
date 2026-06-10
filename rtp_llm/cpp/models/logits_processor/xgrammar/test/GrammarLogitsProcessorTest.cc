@@ -1,0 +1,235 @@
+// Unit tests for GrammarLogitsProcessor::tryAcceptAndFillBitmask — the A2
+// per-stream speculative-verify fill. Pure CPU (no GPU / Python): builds a
+// matcher over a 128-char ASCII vocab, runs a draft chain through the fill, and
+// asserts the returned cap, the per-row legal sets, and (crucially) that a
+// terminated matcher leaves rows at allow-all instead of CHECK-failing inside
+// xgrammar.
+//
+// Run: bazel test //rtp_llm/cpp/models/logits_processor/xgrammar/test:grammar_logits_processor_test --config=cuda12_9
+
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/RtpGrammarMatcher.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+
+#include <gtest/gtest.h>
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <xgrammar/tokenizer_info.h>
+
+namespace rtp_llm {
+namespace {
+
+std::string makeAsciiTokenizerInfoJson() {
+    std::vector<std::string> vocab;
+    vocab.reserve(128);
+    for (int i = 0; i < 128; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    xgrammar::TokenizerInfo info(vocab,
+                                 xgrammar::VocabType::RAW,
+                                 /*vocab_size=*/128,
+                                 /*stop_token_ids=*/std::vector<int32_t>{0});
+    return info.SerializeJSON();
+}
+
+XGrammarBackendOptions defaultOptions() {
+    XGrammarBackendOptions opts;
+    opts.any_whitespace        = true;
+    opts.strict_mode           = true;
+    opts.max_compiler_threads  = 2;
+    opts.enable_compiler_cache = true;
+    opts.compiler_cache_bytes  = -1;
+    return opts;
+}
+
+// Build a GrammarLogitsProcessor over a regex matcher. The stream is null —
+// tryAcceptAndFillBitmask only touches the matcher, never the stream.
+std::shared_ptr<GrammarLogitsProcessor> makeProcessor(XGrammarBackendCpp& backend, const std::string& regex) {
+    auto compiled = backend.compileNow({"regex", regex}).compiled;
+    EXPECT_TRUE(compiled);
+    std::shared_ptr<RtpGrammarMatcher> matcher = backend.createMatcher(compiled, /*require_reasoning=*/false);
+    return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), /*stream=*/nullptr);
+}
+
+bool rowAllows(const std::vector<int32_t>& bm, size_t words, int row, int token) {
+    const int32_t word = bm[static_cast<size_t>(row) * words + token / 32];
+    return (static_cast<uint32_t>(word) & (1u << (token % 32))) != 0u;
+}
+
+constexpr int kA = 'a';  // token id 97
+constexpr int kB = 'b';  // token id 98
+constexpr int kX = 'x';  // token id 120
+
+}  // namespace
+
+// regex "ab": legal sequence is 'a' then 'b'. A fully-legal draft chain should
+// return cap == propose_step with each row constraining to the expected token.
+TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    const int    propose_step = 2;
+    const size_t words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kA, kB};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    const int cap = proc->tryAcceptAndFillBitmask(req);
+    EXPECT_EQ(cap, propose_step) << "every draft token is grammar-legal";
+    EXPECT_TRUE(rowAllows(bm, words, 0, kA)) << "row 0 must allow 'a'";
+    EXPECT_FALSE(rowAllows(bm, words, 0, kB)) << "row 0 must NOT allow 'b' at the start";
+    EXPECT_TRUE(rowAllows(bm, words, 1, kB)) << "row 1 (after 'a') must allow 'b'";
+}
+
+// A draft token that violates the grammar caps at that offset.
+TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    const int    propose_step = 2;
+    const size_t words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kA, kX};  // 'a' ok, then 'x' illegal (expected 'b')
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    const int cap = proc->tryAcceptAndFillBitmask(req);
+    EXPECT_EQ(cap, 1) << "draft[1]='x' is illegal after 'a', so cap == 1";
+}
+
+// Regression for the terminated-matcher guard: once the grammar terminates
+// (after "ab"), further offsets must NOT call fillBitmask (which CHECK-fails in
+// xgrammar on a terminated matcher); the rows are left at allow-all and the
+// call must not crash.
+TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    const int    propose_step = 3;  // one past the grammar's natural end
+    const size_t words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kA, kB, kA, kB};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    // Must not throw / CHECK-fail; rows past termination stay allow-all.
+    int cap = 0;
+    ASSERT_NO_THROW({ cap = proc->tryAcceptAndFillBitmask(req); });
+    EXPECT_GE(cap, 2) << "the 'a','b' prefix is accepted before termination";
+    // Row after termination is left allow-all (e.g. 'x' is allowed = not masked).
+    EXPECT_TRUE(rowAllows(bm, words, 3, kX));
+}
+
+// tryAcceptAndFillBitmask must leave the matcher's committed state unchanged
+// (it rolls back any provisional accepts): a second identical call yields the
+// same cap.
+TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    const int    propose_step = 2;
+    const size_t words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kA, kB};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    const int cap1 = proc->tryAcceptAndFillBitmask(req);
+    const int cap2 = proc->tryAcceptAndFillBitmask(req);
+    EXPECT_EQ(cap1, cap2) << "state must be unchanged across calls (rollback)";
+}
+
+TEST(GrammarLogitsProcessorTest, PreviewCommitTruncatesAfterGrammarComplete) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    // Spec proposed [a,b,x] but grammar completes after "ab".
+    const std::vector<int32_t> proposed{kA, kB, kX};
+    EXPECT_EQ(proc->previewCommitTokenCount(proposed), 2);
+    EXPECT_FALSE(proc->grammarMatcher()->isTerminated());
+}
+
+TEST(GrammarLogitsProcessorTest, PreviewCommitAcceptsFullLegalPrefix) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    const std::vector<int32_t> proposed{kA, kB};
+    EXPECT_EQ(proc->previewCommitTokenCount(proposed), 2);
+    EXPECT_FALSE(proc->grammarMatcher()->isTerminated()) << "preview rolls back provisional accepts";
+}
+
+TEST(GrammarLogitsProcessorTest, PreviewCommitZeroWhenGrammarAlreadyComplete) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kA));
+    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kB));
+    EXPECT_TRUE(proc->isGrammarMatcherComplete());
+    EXPECT_EQ(proc->previewCommitTokenCount({kX}), 0);
+}
+
+TEST(GrammarLogitsProcessorTest, PreviewCommitRejectsIllegalFirstToken) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    EXPECT_FALSE(proc->isGrammarMatcherComplete());
+    EXPECT_EQ(proc->previewCommitTokenCount({kX}), 0);
+}
+
+TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    const int            propose_step = 2;
+    const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> bad_draft{kX, kB};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = bad_draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
+    EXPECT_EQ(proc->previewCommitTokenCount({kX}), 0);
+}
+
+TEST(GrammarLogitsProcessorTest, MatcherForkPreservesAcceptedPrefix) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kA));
+    auto forked = proc->grammarMatcher()->fork();
+    ASSERT_TRUE(forked);
+    EXPECT_EQ(forked->numAcceptedTokens(), proc->grammarMatcher()->numAcceptedTokens());
+    EXPECT_TRUE(forked->acceptToken(kB));
+}
+
+}  // namespace rtp_llm
