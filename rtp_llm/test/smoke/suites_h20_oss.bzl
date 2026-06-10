@@ -234,6 +234,55 @@ def h20_oss_suites():
         ],
     )
 
+    # H20 Grammar (xgrammar) structured-output smoke — qwen35 single-node MTP.
+    # PD / cheap qwen2 cases removed; production path is LocalRpc + MTP + grammar.
+    native.test_suite(
+        name = "smoke_h20_grammar",
+        tests = [
+            # MTP + grammar + reasoning + concurrent (thinking ON). Matcher
+            # passthrough until </think>, then schema lock.
+            smoke_test(
+                name = "qwen35_mtp_grammar_reasoning_concurrent",
+                task_info = "data/model/qwen35/q_r_mtp_grammar_reasoning_concurrent.json",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1 --reasoning_parser qwen3 --concurrency_limit 8",
+                envs = ["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO", "PYTHONUNBUFFERED=TRUE"],
+                gpu_type = ["H20"],
+                concurrency_test = True,
+            ),
+            # MTP + grammar + concurrent (thinking OFF). enable_thinking=false
+            # in task JSON + --think_mode 0: xgrammar active from first token.
+            # Do not use for think-end / passthrough coverage — use
+            # qwen35_mtp_grammar_reasoning_concurrent instead.
+            smoke_test(
+                name = "qwen35_mtp_grammar_concurrent",
+                task_info = "data/model/qwen35/q_r_mtp_grammar.json",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 0 --concurrency_limit 8",
+                envs = ["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO", "PYTHONUNBUFFERED=TRUE"],
+                gpu_type = ["H20"],
+                concurrency_test = True,
+            ),
+            # PD separation + MTP + grammar + reasoning — all four axes
+            # stacked: decode rebuilds matcher via bonus-token replay, spec
+            # verify does fork/rollback, AND the reasoner gate must transition
+            # from passthrough to active across the PD boundary (think body
+            # produced during prefill, grammar locks on after </think> on decode
+            # side). This is the highest-risk combination.
+            smoke_test(
+                name = "qwen35_grammar_pd_mtp_reasoning",
+                task_info = "data/model/qwen35/q_r_mtp_grammar_reasoning.json",
+                smoke_args = {
+                    "prefill": "--act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1 --reasoning_parser qwen3 --load_method scratch",
+                    "decode":  "--load_cache_timeout_ms 120000 --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1 --reasoning_parser qwen3 --load_method scratch",
+                },
+                gpu_type = ["H20"],
+                envs = {
+                    "prefill": ["PYTHONUNBUFFERED=TRUE"],
+                    "decode":  ["PYTHONUNBUFFERED=TRUE"],
+                },
+            ),
+        ],
+    )
+
 
     # H20 Qwen3.5/Next
     native.test_suite(
