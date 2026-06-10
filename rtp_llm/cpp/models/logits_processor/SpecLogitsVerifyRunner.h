@@ -49,17 +49,15 @@ public:
 private:
     void ensureBuffersFit(size_t total_streams, int propose_step, size_t vocab_size, size_t bitmask_words);
     void materializeDraftTokensToCpu(const LaunchTask& task);
-    void unpackMergedBitmaskToVocabMask(const torch::Tensor& mask_cpu,
-                                        size_t               rows,
-                                        size_t               vocab_size,
-                                        size_t               bitmask_words);
 
 private:
     torch::Stream copy_stream_;
     torch::Tensor draft_tokens_cpu_;
     torch::Tensor processor_bitmask_cpu_;
     torch::Tensor merged_bitmask_cpu_;
+    torch::Tensor merged_bitmask_gpu_;
     torch::Tensor spec_cap_cpu_;
+    torch::Tensor spec_cap_gpu_;
 };
 
 }  // namespace rtp_llm

@@ -17,19 +17,39 @@ _GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
 )
 
 
-def _response_format_is_grammar(rf: Optional[Union[str, Dict[str, Any]]]) -> bool:
+def _parse_response_format(
+    rf: Optional[Union[str, Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """Parse response_format once; None means no constraint."""
+    if not rf:
+        return None
+    if isinstance(rf, dict):
+        return rf if rf else None
+    if isinstance(rf, str):
+        stripped = rf.strip()
+        if not stripped:
+            return None
+        parsed = json.loads(stripped)
+        if not isinstance(parsed, dict):
+            raise TypeError("response_format JSON must be an object")
+        return parsed
+    raise TypeError(f"response_format has unsupported type {type(rf).__name__}")
+
+
+def _response_format_is_grammar(
+    rf: Optional[Union[str, Dict[str, Any]]],
+    parsed: Optional[Dict[str, Any]] = None,
+) -> bool:
     # Empty string / None / empty object mean "no structured-output constraint";
     # only known response_format.type values below request grammar handling.
-    if not rf:
-        return False
-    if isinstance(rf, str):
+    if parsed is None:
         try:
-            rf = json.loads(rf)
+            parsed = _parse_response_format(rf)
         except (json.JSONDecodeError, TypeError):
             return False
-    if not isinstance(rf, dict):
+    if not parsed:
         return False
-    return rf.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
+    return parsed.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
 
 
 class RequestFormat:
@@ -443,11 +463,23 @@ class GenerateConfig(BaseModel):
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
 
+        parsed_response_format: Optional[Dict[str, Any]] = None
+        if self.response_format is not None:
+            try:
+                parsed_response_format = _parse_response_format(self.response_format)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"response_format is not valid JSON: {e}",
+                )
+
         # Grammar-constrained decoding advances the matcher one token at a
         # time, but NormalOutputDispatcher skips that advance under beam
         # search (num_beams > 1 / num_return_sequences > 1), so the matcher
         # never moves and schema-illegal tokens can be emitted. Fail fast.
-        if (self.has_num_beams() or self.num_return_sequences > 1) and self._has_grammar_constraint():
+        if (self.has_num_beams() or self.num_return_sequences > 1) and self._has_grammar_constraint(
+            parsed_response_format
+        ):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "grammar-constrained decoding (json_schema / regex / ebnf / "
@@ -455,21 +487,10 @@ class GenerateConfig(BaseModel):
                 "search (num_beams > 1 or num_return_sequences > 1)",
             )
 
-        # A non-empty string response_format must be valid JSON. Fail loudly here
-        # instead of letting _response_format_is_grammar silently treat an
-        # unparseable envelope as "no constraint" (which would run unconstrained).
-        rf = self.response_format
-        if isinstance(rf, str) and rf.strip():
-            try:
-                json.loads(rf)
-            except (json.JSONDecodeError, TypeError) as e:
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    f"response_format is a string but not valid JSON: {e}",
-                )
-
-    def _has_grammar_constraint(self) -> bool:
+    def _has_grammar_constraint(
+        self, parsed_response_format: Optional[Dict[str, Any]] = None
+    ) -> bool:
         if self.json_schema is not None or self.regex is not None \
                 or self.ebnf is not None or self.structural_tag is not None:
             return True
-        return _response_format_is_grammar(self.response_format)
+        return _response_format_is_grammar(self.response_format, parsed_response_format)

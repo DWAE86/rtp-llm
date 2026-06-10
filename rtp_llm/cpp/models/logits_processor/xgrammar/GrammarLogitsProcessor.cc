@@ -18,6 +18,9 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA || USING_ROCM
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/xgrammar_kernels.h"
+#endif
 
 namespace rtp_llm {
 
@@ -41,6 +44,12 @@ bool bitmaskAllowsToken(const int32_t* bitmask, int32_t token_id) {
     const int32_t word = bitmask[token_id / 32];
     return (static_cast<uint32_t>(word) & (1u << (token_id % 32))) != 0u;
 }
+
+enum class VerifyRowState {
+    Active,
+    Finished,
+    Terminated,
+};
 
 void clearTokenFromBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
     if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
@@ -513,8 +522,14 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskS
         return state;
     }
 
-    const int32_t words   = (grammar_vocab_size + 31) / 32;
-    auto          bitmask = at::full({1, words}, -1, at::dtype(at::kInt));
+    const int32_t words = (grammar_vocab_size + 31) / 32;
+    if (!reusable_bitmask_cpu_.defined() || reusable_mask_words_ < words) {
+        reusable_bitmask_cpu_ = at::full({1, words}, -1, at::dtype(at::kInt));
+        reusable_mask_words_  = words;
+    } else {
+        reusable_bitmask_cpu_.fill_(-1);
+    }
+    auto bitmask = reusable_bitmask_cpu_.narrow(1, 0, words);
     int64_t       dl_shape[2];
     DLTensor      dl      = makeSingleRowBitmaskView(bitmask.data_ptr<int32_t>(), words, dl_shape);
     if (!matcher_->fillBitmask(&dl, 0)) {
@@ -522,14 +537,27 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskS
         return state;
     }
 
-    // TODO(grammar-perf): reuse a persistent pinned/device buffer instead of
-    // allocating a fresh V-element bool tensor every token. Consider applying
-    // the int32 bitmask directly on GPU via a kernel (bitmask_ops Triton).
-    auto mask_options = torch::TensorOptions().dtype(torch::kBool);
+    state.grammar_vocab_size = grammar_vocab_size;
+#if USING_CUDA || USING_ROCM
     if (device.is_cuda()) {
-        mask_options = mask_options.pinned_memory(true);
+        if (!reusable_bitmask_gpu_.defined() || reusable_bitmask_gpu_.size(1) < words
+            || reusable_bitmask_gpu_.device() != device) {
+            reusable_bitmask_gpu_ = torch::empty({1, words}, bitmask.options().device(device));
+        }
+        reusable_bitmask_gpu_.copy_(bitmask, /*non_blocking=*/true);
+        state.packed_bitmask = reusable_bitmask_gpu_.narrow(1, 0, words);
+        state.mode           = DeviceMaskMode::MASK;
+        state.ready_event    = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        state.ready_event->record(cuda_graph::graphGetCurrentStream());
+        return state;
     }
-    auto           vocab_mask  = torch::empty({grammar_vocab_size}, mask_options);
+#endif
+
+    if (!reusable_vocab_mask_cpu_.defined() || reusable_vocab_mask_cpu_.size(0) < grammar_vocab_size) {
+        auto mask_options = torch::TensorOptions().dtype(torch::kBool);
+        reusable_vocab_mask_cpu_ = torch::empty({grammar_vocab_size}, mask_options);
+    }
+    auto           vocab_mask  = reusable_vocab_mask_cpu_.narrow(0, 0, grammar_vocab_size);
     bool*          mask_ptr    = vocab_mask.data_ptr<bool>();
     const int32_t* bitmask_ptr = bitmask.data_ptr<int32_t>();
     for (int32_t token_id = 0; token_id < grammar_vocab_size; ++token_id) {
@@ -571,6 +599,20 @@ void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, c
         case DeviceMaskMode::MASK:
             break;
     }
+
+#if USING_CUDA || USING_ROCM
+    if (state.packed_bitmask.defined() && logits.is_cuda()) {
+        if (state.ready_event) {
+            state.ready_event->block(cuda_graph::graphGetCurrentStream());
+        }
+        auto logits_2d = logits.unsqueeze(0);
+        invokeApplyXGrammarBitmaskInplace(logits_2d,
+                                          state.packed_bitmask,
+                                          static_cast<int64_t>(state.grammar_vocab_size),
+                                          cuda_graph::graphGetCurrentStream().stream());
+        return;
+    }
+#endif
 
     if (!state.vocab_mask.defined()) {
         return;
@@ -622,7 +664,7 @@ void GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_i
         return;
     }
     if (inputs.finished_mask.defined()) {
-        const auto* finished = inputs.finished_mask.data_ptr<uint8_t>();
+        const auto* finished = inputs.finished_mask.data_ptr<bool>();
         if (finished[start_idx]) {
             return;
         }
@@ -896,18 +938,18 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
     int        accepted_prefix = 0;
     int        cap             = P;
 
-    auto fill_row = [&](int32_t* row) {
+    auto fill_row = [&](int32_t* row) -> VerifyRowState {
         std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
         if (matcher_->finished()) {
-            return;
+            return VerifyRowState::Finished;
         }
         if (matcher_->isTerminated()) {
             forceTokenInBitmask(row, W, eos_token_id_);
-            return;
+            return VerifyRowState::Terminated;
         }
         if (matcher_->isPassthroughForMask()) {
             clearTokenFromBitmask(row, W, eos_token_id_);
-            return;
+            return VerifyRowState::Active;
         }
 
         const int32_t grammar_vocab_size = matcher_->vocabSize();
@@ -920,16 +962,21 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         if (!matcher_->fillBitmask(&dl, 0) && matcher_->isPassthroughForMask()) {
             std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
             clearTokenFromBitmask(row, W, eos_token_id_);
-            return;
+            return VerifyRowState::Active;
         }
         clearBitmaskTokenRange(row, W, grammar_vocab_size, static_cast<int64_t>(request.vocab_size));
+        return VerifyRowState::Active;
     };
 
     try {
         for (int offset = 0; offset <= P; ++offset) {
             int32_t* row = request.bitmask_cpu_out + offset * W;
-            fill_row(row);
+            const VerifyRowState row_state = fill_row(row);
             if (offset == P) {
+                break;
+            }
+            if (row_state == VerifyRowState::Terminated || row_state == VerifyRowState::Finished) {
+                cap = offset;
                 break;
             }
 
@@ -944,6 +991,10 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
                 break;
             }
             ++accepted_prefix;
+            if (matcher_->isTerminated() || matcher_->finished()) {
+                cap = offset + 1;
+                break;
+            }
         }
 
         if (accepted_prefix > 0) {

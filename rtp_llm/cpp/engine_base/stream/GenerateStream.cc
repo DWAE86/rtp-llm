@@ -551,6 +551,11 @@ std::optional<StreamState> GenerateStream::pollLogitsProcessorPreparationWhileWa
     if (!preparation_pending_ || generate_status_->getStatus() != StreamState::WAITING) {
         return std::nullopt;
     }
+    // Do not let the readiness gate mask an error already reported (timeout, cancel, etc.).
+    if (hasError() || hasEvent(StreamEvents::Error)) {
+        preparation_pending_ = false;
+        return std::nullopt;
+    }
 
     bool any_pending = false;
     bool any_failed  = false;
@@ -575,6 +580,10 @@ std::optional<StreamState> GenerateStream::pollLogitsProcessorPreparationWhileWa
         }
     }
     if (any_pending) {
+        if (hasError() || hasEvent(StreamEvents::Error)) {
+            preparation_pending_ = false;
+            return std::nullopt;
+        }
         return StreamState::WAITING;
     }
     if (any_failed) {

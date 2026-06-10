@@ -160,12 +160,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         string     error_msg   = "request: [" + decode_context.request_key
                              + "] allocate resource failed at decode node: " + status_info.ToString();
         RTP_LLM_LOG_ERROR(error_msg);
-        auto grpc_code = grpc::StatusCode::RESOURCE_EXHAUSTED;
-        if (status_info.code() == ErrorCode::INVALID_PARAMS
-            || status_info.code() == ErrorCode::EXECUTION_EXCEPTION) {
-            grpc_code = grpc::StatusCode::INVALID_ARGUMENT;
-        }
-        decode_context.error_status = grpc::Status(grpc_code, error_msg);
+        decode_context.error_status =
+            grpc::Status(transErrorCodeToGrpc(status_info.code()), error_msg);
         return;
     }
 

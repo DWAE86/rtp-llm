@@ -16,7 +16,7 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     if (top_k == 1) {
         sample_res = torch::max(output.all_probs, -1, true);
     } else {
-        sample_res = torch::topk(output.all_probs, -1, -1);
+        sample_res = torch::topk(output.all_probs, top_k, -1);
     }
 
     output.token_ids = std::get<1>(sample_res);
@@ -102,20 +102,25 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     accept_tokens_d.index_put_({row_idx, col_idx}, last_tokens);
 
     bool has_force = false;
-    auto force_mask =
-        torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
-    {
-        int idx = 0;
-        for (const auto& stream : streams) {
-            if (stream->forceSpAccept()) {
-                force_mask[idx] = true;
-                has_force       = true;
-            }
-            idx++;
+    for (const auto& stream : streams) {
+        if (stream->forceSpAccept()) {
+            has_force = true;
+            break;
         }
     }
     if (has_force) {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.forceSpAccept");
+        auto force_mask =
+            torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
+        {
+            int idx = 0;
+            for (const auto& stream : streams) {
+                if (stream->forceSpAccept()) {
+                    force_mask[idx] = true;
+                }
+                idx++;
+            }
+        }
         auto target_bonus  = target_last_col.select(1, static_cast<int64_t>(propose_step_));
         auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus.unsqueeze(1)}, 1);
         auto force_mask_2d = force_mask.unsqueeze(1).expand_as(accept_tokens_d);

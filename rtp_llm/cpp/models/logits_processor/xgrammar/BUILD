@@ -68,7 +68,12 @@ cc_library(
         "//rtp_llm/cpp/models:sample_infos",
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ],
+    ] + select({
+        "//:using_cuda": [
+            "//rtp_llm/cpp/models/logits_processor/xgrammar:xgrammar_kernels",
+        ],
+        "//conditions:default": [],
+    }),
     copts = copts(),
 )
 

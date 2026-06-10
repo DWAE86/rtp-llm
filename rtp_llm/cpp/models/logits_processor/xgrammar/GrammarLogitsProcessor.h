@@ -81,6 +81,8 @@ private:
         int64_t                       token_len = -1;
         c10::Device                   device    = c10::Device(c10::DeviceType::CPU);
         torch::Tensor                 vocab_mask;
+        torch::Tensor                 packed_bitmask;
+        int32_t                       grammar_vocab_size = 0;
         std::shared_ptr<torch::Event> ready_event;
     };
 
@@ -125,6 +127,10 @@ private:
     int64_t                     pending_async_token_len_     = 0;
     std::optional<c10::Device>  last_mask_device_;
     DeviceMaskState             device_mask_state_;
+    torch::Tensor               reusable_bitmask_cpu_;
+    torch::Tensor               reusable_bitmask_gpu_;
+    torch::Tensor               reusable_vocab_mask_cpu_;
+    int32_t                     reusable_mask_words_ = 0;
 };
 
 }  // namespace rtp_llm

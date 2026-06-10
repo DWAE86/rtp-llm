@@ -182,7 +182,12 @@ class GrammarConstraintComparer(OpenaiComparer):
         diffs: List[str] = []
         self._check_response_type(expect_result, actual_result, diffs)
 
-        for idx, choice in enumerate(self._choices(actual_result)):
+        actual_choices = self._choices(actual_result)
+        if not actual_choices:
+            diffs.append("actual response has no choices — cannot validate grammar constraint")
+            self._raise(self._format_all_diffs(diffs))
+
+        for idx, choice in enumerate(actual_choices):
             content = self._extract_content(choice)
             finish_reason = self._extract_finish_reason(choice)
             if content is None:
@@ -201,8 +206,7 @@ class GrammarConstraintComparer(OpenaiComparer):
                     f"  content({len(content)}B): {content[:500]!r}"
                 )
                 continue
-            clean = content.strip()
-            if compiled.fullmatch(clean) is None:
+            if compiled.fullmatch(content) is None:
                 preview = content[:500]
                 suffix = "..." if len(content) > len(preview) else ""
                 diffs.append(
@@ -227,22 +231,21 @@ class GrammarConstraintComparer(OpenaiComparer):
         if not schema:
             self._raise("json_schema response_format missing 'schema'")
 
-        # When the query enables thinking, reasoning_content should be
-        # free-form natural text — proves the grammar mask is OFF before
-        # </think>. Paired with the schema check on `content`, this pins
-        # both halves of the reasoner invariant (think = unconstrained,
-        # post-think = schema-constrained) without needing a per-case flag.
+        # Opt-in: some reasoner smoke cases assert reasoning_content stays free-form
+        # during the thinking phase. Disabled by default to avoid flaky heuristics.
         check_reasoning_unconstrained = bool(
-            self.qr_info.get("query", {})
-            .get("extra_configs", {})
-            .get("chat_template_kwargs", {})
-            .get("enable_thinking", False)
+            self.qr_info.get("grammar_check_reasoning_unconstrained")
         )
 
         diffs: List[str] = []
         self._check_response_type(expect_result, actual_result, diffs)
 
-        for idx, choice in enumerate(self._choices(actual_result)):
+        actual_choices = self._choices(actual_result)
+        if not actual_choices:
+            diffs.append("actual response has no choices — cannot validate grammar constraint")
+            self._raise(self._format_all_diffs(diffs))
+
+        for idx, choice in enumerate(actual_choices):
             content = self._extract_content(choice)
             finish_reason = self._extract_finish_reason(choice)
             if content is None:
@@ -394,7 +397,12 @@ class GrammarConstraintComparer(OpenaiComparer):
         diffs: List[str] = []
         self._check_response_type(expect_result, actual_result, diffs)
 
-        for idx, choice in enumerate(self._choices(actual_result)):
+        actual_choices = self._choices(actual_result)
+        if not actual_choices:
+            diffs.append("actual response has no choices — cannot validate grammar constraint")
+            self._raise(self._format_all_diffs(diffs))
+
+        for idx, choice in enumerate(actual_choices):
             content = self._extract_content(choice)
             finish_reason = self._extract_finish_reason(choice)
             if content is None:

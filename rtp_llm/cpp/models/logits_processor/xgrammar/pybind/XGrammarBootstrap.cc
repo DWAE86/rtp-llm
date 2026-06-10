@@ -21,11 +21,18 @@ std::string buildXGrammarTokenizerInfoJson(
     const std::string&                              backend_tokenizer_str,
     int64_t                                         vocab_size,
     const std::vector<int32_t>&                     stop_token_ids) {
-    std::vector<std::string> encoded_vocab(vocab_size);
+    static constexpr int64_t kMaxVocabSize = 1'000'000;
+    if (vocab_size <= 0 || vocab_size > kMaxVocabSize) {
+        throw std::invalid_argument("vocab_size must be in (0, " + std::to_string(kMaxVocabSize) + "], got "
+                                    + std::to_string(vocab_size));
+    }
+    std::vector<std::string> encoded_vocab(static_cast<size_t>(vocab_size));
     for (const auto& [tok, tid] : vocab) {
-        if (tid >= 0 && tid < static_cast<int32_t>(vocab_size)) {
-            encoded_vocab[tid] = tok;
+        if (tid < 0 || tid >= vocab_size) {
+            throw std::invalid_argument("token id " + std::to_string(tid) + " is out of vocab range [0, "
+                                        + std::to_string(vocab_size) + ")");
         }
+        encoded_vocab[static_cast<size_t>(tid)] = tok;
     }
 
     // DetectMetadataFromHF returns {"vocab_type":N,"add_prefix_space":bool};

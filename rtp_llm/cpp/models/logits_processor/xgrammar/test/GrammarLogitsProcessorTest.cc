@@ -63,6 +63,7 @@ bool rowAllows(const std::vector<int32_t>& bm, size_t words, int row, int token)
 constexpr int kA = 'a';  // token id 97
 constexpr int kB = 'b';  // token id 98
 constexpr int kX = 'x';  // token id 120
+constexpr int kEos = 0;  // stop token in makeAsciiTokenizerInfoJson
 
 }  // namespace
 
@@ -113,16 +114,16 @@ TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
 }
 
 // Regression for the terminated-matcher guard: once the grammar terminates
-// (after "ab"), further offsets must NOT call fillBitmask (which CHECK-fails in
-// xgrammar on a terminated matcher); the rows are left at allow-all and the
-// call must not crash.
+// (after "ab"), verify must stop with cap == 2 and must NOT call acceptToken on
+// the already-terminated matcher for trailing draft tokens (including EOS).
 TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
     XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
     const int    propose_step = 3;  // one past the grammar's natural end
     const size_t words        = SpecLogitsProcessor::bitmaskWordCount(128);
-    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words,
+                            SpecLogitsProcessor::kBitmaskAllowAll);
     std::vector<int32_t> draft{kA, kB, kA, kB};
 
     SpecLogitsProcessorRequest req;
@@ -132,12 +133,58 @@ TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    // Must not throw / CHECK-fail; rows past termination stay allow-all.
     int cap = 0;
     ASSERT_NO_THROW({ cap = proc->tryAcceptAndFillBitmask(req); });
-    EXPECT_GE(cap, 2) << "the 'a','b' prefix is accepted before termination";
-    // Row after termination is left allow-all (e.g. 'x' is allowed = not masked).
+    EXPECT_EQ(cap, 2) << "grammar completes after 'ab'; trailing draft must not advance matcher";
+    EXPECT_FALSE(proc->grammarMatcher()->isTerminated())
+        << "provisional accepts must roll back committed matcher state";
+    // Unfilled rows stay at allow-all (init + fill_row never reached offset 2+).
     EXPECT_TRUE(rowAllows(bm, words, 3, kX));
+}
+
+TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    const int    propose_step = 3;
+    const size_t words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kA, kB, kEos, kX};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    const int cap = proc->tryAcceptAndFillBitmask(req);
+    EXPECT_EQ(cap, 2);
+    EXPECT_FALSE(proc->grammarMatcher()->isTerminated());
+}
+
+TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
+    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto               proc = makeProcessor(backend, "ab");
+
+    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kA));
+    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kB));
+    EXPECT_TRUE(proc->isGrammarMatcherComplete());
+
+    const int            propose_step = 2;
+    const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kX, kX, kX};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
+    EXPECT_TRUE(proc->isGrammarMatcherComplete());
 }
 
 // tryAcceptAndFillBitmask must leave the matcher's committed state unchanged

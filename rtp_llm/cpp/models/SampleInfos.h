@@ -69,7 +69,7 @@ public:
 
     LogitsProcessorPhase phase = LogitsProcessorPhase::NORMAL_DECODE;
 
-    // MTP verify: bool vocab mask [batch * (propose_step + 1), vocab_size]; true = disallowed.
+    // MTP verify: int32 packed bitmask [batch * (propose_step + 1), bitmask_words]; bit=1 allowed.
     torch::Tensor                 spec_vocab_mask_gpu;
     torch::Tensor                 spec_cap_gpu;
     std::shared_ptr<torch::Event> spec_mask_ready_event;

@@ -300,6 +300,27 @@ TEST_F(QueryConverterTest, ResponseFormat_TextTypeIsNoOp) {
     EXPECT_FALSE(cfg->structural_tag.has_value());
 }
 
+TEST_F(QueryConverterTest, ResponseFormat_EmptyStringAndObjectAreNoOp) {
+    {
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        input.mutable_generate_config()->mutable_response_format()->set_value("");
+        auto cfg = QueryConverter::transQuery(&input)->generate_config;
+        EXPECT_FALSE(cfg->json_schema.has_value());
+        EXPECT_FALSE(cfg->regex.has_value());
+        EXPECT_FALSE(cfg->ebnf.has_value());
+        EXPECT_FALSE(cfg->structural_tag.has_value());
+    }
+    {
+        auto input = makeInputWithResponseFormat("{}");
+        auto cfg   = QueryConverter::transQuery(&input)->generate_config;
+        EXPECT_FALSE(cfg->json_schema.has_value());
+        EXPECT_FALSE(cfg->regex.has_value());
+        EXPECT_FALSE(cfg->ebnf.has_value());
+        EXPECT_FALSE(cfg->structural_tag.has_value());
+    }
+}
+
 TEST_F(QueryConverterTest, ResponseFormat_InvalidEnvelopesAreRejected) {
     // Every case below routes to either the JSON-parse throw or the empty-
     // result backstop in normalizeResponseFormat, ending up as INVALID_PARAMS

@@ -52,6 +52,8 @@ public:
 private:
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
+    std::shared_ptr<GenerateStream> createAdmissionRejectedStream(const std::shared_ptr<GenerateInput>& input,
+                                                                  const absl::Status&                     status);
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);

@@ -21,12 +21,13 @@ TEST(GrammarSchemaValidatorTest, RejectsUnsupportedMultipleOf) {
     EXPECT_EQ(result.status, GrammarValidateStatus::UnsupportedFeature);
 }
 
-TEST(GrammarSchemaValidatorTest, RejectsInvalidRegex) {
-    auto result = validateGrammarKey({"regex", "[unclosed"});
+TEST(GrammarSchemaValidatorTest, RejectsEmptyRegex) {
+    auto result = validateGrammarKey({"regex", ""});
     EXPECT_EQ(result.status, GrammarValidateStatus::InvalidSyntax);
 }
 
-TEST(GrammarSchemaValidatorTest, AcceptsSimpleRegex) {
+TEST(GrammarSchemaValidatorTest, AcceptsSimpleRegexWithoutSyncCompile) {
+    // Syntax validation is deferred to the async compile worker.
     auto result = validateGrammarKey({"regex", "ab"});
     EXPECT_EQ(result.status, GrammarValidateStatus::Ok);
 }

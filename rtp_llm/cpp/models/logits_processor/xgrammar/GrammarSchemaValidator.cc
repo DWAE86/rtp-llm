@@ -5,9 +5,6 @@
 #include "autil/legacy/json.h"
 #include "autil/legacy/jsonizable.h"
 
-#include <xgrammar/compiler.h>
-#include <xgrammar/tokenizer_info.h>
-
 #include <functional>
 #include <string>
 #include <vector>
@@ -124,47 +121,13 @@ void walkSchema(const autil::legacy::Any& node,
 
 static constexpr size_t kMaxRegexEbnfSize = 64 * 1024;  // 64 KiB
 
-GrammarValidateResult tryCompileGrammarSyntax(const GrammarKeyCpp& key) {
+GrammarValidateResult validateRegexEbnfKeyLightweight(const GrammarKeyCpp& key) {
     if (key.key_string.size() > kMaxRegexEbnfSize) {
         return {GrammarValidateStatus::TooLarge,
                 "regex/ebnf grammar exceeds maximum size limit (64 KiB)"};
     }
     if (key.key_string.empty()) {
         return {GrammarValidateStatus::InvalidSyntax, "empty grammar string"};
-    }
-
-    struct ThreadLocalCompiler {
-        std::vector<std::string> vocab;
-        xgrammar::TokenizerInfo info;
-        xgrammar::GrammarCompiler compiler;
-
-        ThreadLocalCompiler():
-            vocab([]() {
-                std::vector<std::string> v;
-                v.reserve(128);
-                for (int i = 0; i < 128; ++i) {
-                    v.emplace_back(1, static_cast<char>(i));
-                }
-                return v;
-            }()),
-            info(vocab,
-                 xgrammar::VocabType::RAW,
-                 /*vocab_size=*/128,
-                 /*stop_token_ids=*/std::vector<int32_t>{0}),
-            compiler(info) {}
-    };
-    thread_local ThreadLocalCompiler tl;
-
-    try {
-        if (key.key_type == "regex") {
-            (void)tl.compiler.CompileRegex(key.key_string);
-        } else if (key.key_type == "ebnf") {
-            (void)tl.compiler.CompileGrammar(key.key_string);
-        } else {
-            return {GrammarValidateStatus::Ok, ""};
-        }
-    } catch (const std::exception& e) {
-        return {GrammarValidateStatus::InvalidSyntax, std::string("invalid grammar syntax: ") + e.what()};
     }
     return {GrammarValidateStatus::Ok, ""};
 }
@@ -176,9 +139,10 @@ GrammarValidateResult validateGrammarKey(const GrammarKeyCpp& key) {
         return {GrammarValidateStatus::Ok, ""};
     }
 
-    // Only validate JSON schema keys here; regex/ebnf get a lightweight compile trial.
+    // regex/ebnf syntax compilation runs in the async worker (compileNow) so
+    // compile_timeout_ms and singleflight protect the request path.
     if (key.key_type != "json") {
-        return tryCompileGrammarSyntax(key);
+        return validateRegexEbnfKeyLightweight(key);
     }
 
     if (key.key_string.size() > kMaxSchemaSize) {

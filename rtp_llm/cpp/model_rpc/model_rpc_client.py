@@ -124,9 +124,14 @@ def trans_input(input_py: GenerateInput):
     # truth for envelope validation (malformed JSON / unknown type / missing
     # payload all become INVALID_PARAMS there).
     if input_py.generate_config.response_format is not None:
-        generate_config_pb.response_format.value = _pb_string_value_for_json_field(
-            input_py.generate_config.response_format
+        rf = input_py.generate_config.response_format
+        skip_empty = (isinstance(rf, str) and not rf.strip()) or (
+            isinstance(rf, dict) and not rf
         )
+        if not skip_empty:
+            generate_config_pb.response_format.value = _pb_string_value_for_json_field(
+                rf
+            )
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)

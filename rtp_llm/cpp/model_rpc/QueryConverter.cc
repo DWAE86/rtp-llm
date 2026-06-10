@@ -96,12 +96,19 @@ std::optional<std::string> extractJsonField(const JsonMap& map, const std::strin
 NormalizedGrammar normalizeResponseFormat(const std::string& response_format_str) {
     NormalizedGrammar out;
 
+    if (response_format_str.empty()) {
+        return out;
+    }
+
     JsonMap response_map;
     try {
         const auto response_any = autil::legacy::json::ParseJson(response_format_str);
         response_map            = autil::legacy::AnyCast<JsonMap>(response_any);
     } catch (const std::exception& e) {
         throw std::invalid_argument(std::string("response_format is not a valid JSON object: ") + e.what());
+    }
+    if (response_map.empty()) {
+        return out;
     }
 
     std::string format_type;

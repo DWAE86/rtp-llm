@@ -5,9 +5,11 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/xgrammar_kernels.h"
 #endif
 
 using namespace std;
@@ -46,7 +48,17 @@ void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
             inputs.spec_mask_ready_event->block(cuda_graph::graphGetCurrentStream());
         }
         recordSpecTensorUseOnCurrentStream(inputs.spec_vocab_mask_gpu);
+#if USING_CUDA
+        RTP_LLM_CHECK_WITH_INFO(inputs.spec_vocab_mask_gpu.scalar_type() == torch::kInt32,
+                                "MTP verify spec mask must be int32 packed bitmask");
+        auto logits = inputs.logits;
+        invokeApplyXGrammarBitmaskInplace(logits,
+                                          inputs.spec_vocab_mask_gpu,
+                                          static_cast<int64_t>(inputs.vocab_size),
+                                          cuda_graph::graphGetCurrentStream().stream());
+#else
         inputs.logits.masked_fill_(inputs.spec_vocab_mask_gpu, BaseLogitsProcessor::neg_inf);
+#endif
     }
 
     for (size_t i = 0; i < logits_processors_.size(); i++) {

@@ -83,7 +83,10 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
     ] + select({
-        "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:standalone_ops"],
+        "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/cpp/models/logits_processor/xgrammar:xgrammar_kernels",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

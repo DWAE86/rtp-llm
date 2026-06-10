@@ -28,7 +28,7 @@
                         }
                     }
                 },
-                "max_tokens": 2048,
+                "max_tokens": 512,
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "stream": false,
@@ -80,7 +80,7 @@
                         }
                     }
                 },
-                "max_tokens": 2048,
+                "max_tokens": 512,
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "stream": false,

@@ -1,8 +1,38 @@
 #include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
 
 #include "rtp_llm/cpp/api_server/Exception.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
+
+namespace {
+
+HttpApiServerException::Type errorCodeToHttpApiType(ErrorCode code) {
+    switch (code) {
+        case ErrorCode::INVALID_PARAMS:
+        case ErrorCode::ERROR_GENERATE_CONFIG_FORMAT:
+        case ErrorCode::EXECUTION_EXCEPTION:
+            return HttpApiServerException::ERROR_INPUT_FORMAT_ERROR;
+        case ErrorCode::GENERATE_TIMEOUT:
+        case ErrorCode::WAIT_TO_RUN_TIMEOUT:
+            return HttpApiServerException::GENERATE_TIMEOUT_ERROR;
+        case ErrorCode::MALLOC_FAILED:
+        case ErrorCode::DECODE_MALLOC_FAILED:
+            return HttpApiServerException::MALLOC_ERROR;
+        case ErrorCode::CANCELLED:
+            return HttpApiServerException::CANCELLED_ERROR;
+        case ErrorCode::LONG_PROMPT_ERROR:
+            return HttpApiServerException::LONG_PROMPT_ERROR;
+        default:
+            return HttpApiServerException::UNKNOWN_ERROR;
+    }
+}
+
+[[noreturn]] void throwStreamError(const ErrorInfo& error_info) {
+    throw HttpApiServerException(errorCodeToHttpApiType(error_info.code()), error_info.ToString());
+}
+
+}  // namespace
 
 GenerateStreamWrapper::GenerateStreamWrapper(const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
                                              const std::shared_ptr<TokenProcessor>&          token_processor):
@@ -14,7 +44,7 @@ void GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
     generate_config_ = input->generate_config;
     stream_          = engine->enqueue(input);
     if (stream_->hasError()) {
-        throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR, stream_->statusInfo().ToString());
+        throwStreamError(stream_->statusInfo());
     }
 }
 
@@ -33,10 +63,20 @@ std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
         return std::make_pair(MultiSeqsResponse(), true);
     }
 
+    if (stream_->hasError()) {
+        throwStreamError(stream_->statusInfo());
+    }
+
     const auto result = stream_->nextOutput();
     if (!result.ok()) {
-        RTP_LLM_LOG_INFO("stream nextOutput failed.");
-        return std::make_pair(MultiSeqsResponse(), true);
+        if (stream_->hasError()) {
+            throwStreamError(stream_->statusInfo());
+        }
+        if (result.status().code() == ErrorCode::OUTPUT_QUEUE_IS_EMPTY) {
+            RTP_LLM_LOG_INFO("stream nextOutput finished (output queue empty).");
+            return std::make_pair(MultiSeqsResponse(), true);
+        }
+        throwStreamError(result.status());
     }
     auto outputs = result.value();
 

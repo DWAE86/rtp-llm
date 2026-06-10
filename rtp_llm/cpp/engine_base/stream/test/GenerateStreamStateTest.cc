@@ -455,6 +455,21 @@ TEST_F(GenerateStreamStateTest, testPreparationFailedFinishesWithError) {
     ASSERT_EQ(finish_state, StreamState::FINISHED);
 }
 
+TEST_F(GenerateStreamStateTest, testPreparationPendingDoesNotMaskExternalError) {
+    auto stream = createStream();
+    auto fake   = armFakePreparation(stream, PrepareState::Pending);
+    stream->reportEvent(StreamEvents::CanRun);
+
+    stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, "decode allocate wait timeout");
+
+    auto state = stream->moveToNext();
+    ASSERT_EQ(state, StreamState::FINISHED);
+    ASSERT_TRUE(stream->hasError());
+    ASSERT_EQ(stream->statusInfo().code(), ErrorCode::WAIT_TO_RUN_TIMEOUT);
+    ASSERT_FALSE(stream->preparation_pending_);
+    ASSERT_EQ(fake->polls, 0);
+}
+
 TEST_F(GenerateStreamStateTest, testPreparationPrepareExceptionFinishesWithError) {
     auto stream         = createStream();
     auto fake           = armFakePreparation(stream, PrepareState::Pending);

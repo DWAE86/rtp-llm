@@ -51,6 +51,17 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
     if (!spec_cap_cpu_.defined() || spec_cap_cpu_.numel() < B) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
+#if USING_CUDA
+    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (!merged_bitmask_gpu_.defined() || merged_bitmask_gpu_.numel() < rows * W) {
+        merged_bitmask_gpu_ = torch::empty({rows, W}, cuda_i32);
+    }
+    if (!spec_cap_gpu_.defined() || spec_cap_gpu_.numel() < B) {
+        spec_cap_gpu_ = torch::empty({B}, cuda_i32);
+    }
+#else
+    (void)rows;
+#endif
 }
 
 void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task) {
@@ -82,23 +93,6 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
     auto draft_i32 = draft.scalar_type() == torch::kInt32 ? draft.contiguous() : draft.to(torch::kInt32).contiguous();
     dst.copy_(draft_i32, /*non_blocking=*/true);
     copy_stream_.synchronize();
-}
-
-void SpecLogitsVerifyRunner::unpackMergedBitmaskToVocabMask(const torch::Tensor& mask_cpu,
-                                                            size_t               rows,
-                                                            size_t               vocab_size,
-                                                            size_t               bitmask_words) {
-    const auto* merged = merged_bitmask_cpu_.data_ptr<int32_t>();
-    auto*       mask   = mask_cpu.data_ptr<bool>();
-    for (size_t row = 0; row < rows; ++row) {
-        const auto* row_bits = merged + row * bitmask_words;
-        auto*       row_mask = mask + row * vocab_size;
-        for (size_t token = 0; token < vocab_size; ++token) {
-            const uint32_t word    = static_cast<uint32_t>(row_bits[token / 32]);
-            const bool     allowed = (word & (1u << (token % 32))) != 0u;
-            row_mask[token]        = !allowed;
-        }
-    }
 }
 
 SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const LaunchTask& task) {
@@ -155,24 +149,13 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         return {};
     }
 
-    // TODO(grammar-perf): keep bitmask in int32 format and apply via a GPU
-    // kernel (like bitmask_ops.py Triton or xgrammar_kernels.cu) to avoid the
-    // B*(P+1)*V bool CPU expansion + H2D copy per verify step.
-    auto pinned_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU).pinned_memory(true);
-    auto pinned_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
-    auto cuda_bool   = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
-    auto cuda_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-
-    auto mask_cpu = torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, pinned_bool);
-    auto cap_cpu  = torch::empty({static_cast<int64_t>(B)}, pinned_i32);
-    auto mask_gpu = torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool);
-    auto cap_gpu  = torch::empty({static_cast<int64_t>(B)}, cuda_i32);
-
-    unpackMergedBitmaskToVocabMask(mask_cpu, rows, V, W);
-    cap_cpu.copy_(spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B)));
+    auto cap_cpu = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
+#if USING_CUDA
+    auto mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(W));
+    auto cap_gpu  = spec_cap_gpu_.narrow(0, 0, static_cast<int64_t>(B));
 
     cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(copy_stream_));
-    mask_gpu.copy_(mask_cpu, /*non_blocking=*/true);
+    mask_gpu.copy_(merged, /*non_blocking=*/true);
     cap_gpu.copy_(cap_cpu, /*non_blocking=*/true);
     auto ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     ready->record(copy_stream_);
@@ -181,8 +164,11 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     result.spec_cap_gpu              = cap_gpu;
     result.ready_event               = ready;
     result.has_active_processor      = true;
-    result.spec_vocab_mask_cpu_owner = mask_cpu;
+    result.spec_vocab_mask_cpu_owner = merged;
     result.spec_cap_cpu_owner        = cap_cpu;
+#else
+    RTP_LLM_FAIL("SpecLogitsVerifyRunner requires CUDA for packed bitmask upload");
+#endif
     return result;
 }
 

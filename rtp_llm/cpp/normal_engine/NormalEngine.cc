@@ -436,14 +436,28 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
     return stream;
 }
 
+std::shared_ptr<GenerateStream> NormalEngine::createAdmissionRejectedStream(
+    const std::shared_ptr<GenerateInput>& input, const absl::Status& status) {
+    auto stripped_input = std::make_shared<GenerateInput>();
+    *stripped_input     = *input;
+    stripped_input->generate_config = std::make_shared<GenerateConfig>(*input->generate_config);
+    auto& cfg                       = *stripped_input->generate_config;
+    cfg.json_schema.reset();
+    cfg.regex.reset();
+    cfg.ebnf.reset();
+    cfg.structural_tag.reset();
+    cfg.response_format.reset();
+    auto stream = createStream(stripped_input);
+    stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, std::string(status.message()));
+    return stream;
+}
+
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     if (auto status = validateStructuredOutputAdmission(input); !status.ok()) {
         RTP_LLM_LOG_INFO("[structured_output_admission] rejected makeStream request %ld: %s",
                          input ? input->request_id : -1,
                          status.message().data());
-        auto stream = createStream(input);
-        stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, std::string(status.message()));
-        return stream;
+        return createAdmissionRejectedStream(input, status);
     }
     return createStream(input);
 }
@@ -458,9 +472,7 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<Gene
         RTP_LLM_LOG_INFO("[structured_output_admission] rejected enqueue request %ld: %s",
                          input ? input->request_id : -1,
                          status.message().data());
-        auto stream = createStream(input);
-        stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, std::string(status.message()));
-        return stream;
+        return createAdmissionRejectedStream(input, status);
     }
     std::shared_ptr<GenerateStream> stream = createStream(input);
     stream->setReserveStep(reserve_step_);
@@ -479,9 +491,7 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
             RTP_LLM_LOG_WARNING("[structured_output_admission] rejected batch enqueue request %ld: %s",
                                 inp ? inp->request_id : -1,
                                 status.message().data());
-            auto stream = createStream(inp);
-            stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, std::string(status.message()));
-            streams.push_back(std::move(stream));
+            streams.push_back(createAdmissionRejectedStream(inp, status));
         } else {
             auto stream = createStream(inp);
             stream->setReserveStep(reserve_step_);
