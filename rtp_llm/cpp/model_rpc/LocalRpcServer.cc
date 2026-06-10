@@ -120,7 +120,15 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 }
 
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    output = QueryConverter::transQuery(&input_pb);
+    try {
+        output = QueryConverter::transQuery(&input_pb);
+    } catch (const std::invalid_argument& e) {
+        // QueryConverter throws std::invalid_argument when the proto carries
+        // a malformed or unsupported response_format envelope. Translate to
+        // INVALID_PARAMS so the client sees an explicit rejection rather
+        // than a silently unconstrained generation.
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+    }
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(output);
@@ -169,6 +177,13 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
         }
     }
+    if (input) {
+        if (auto admission = engine_->validateStructuredOutputAdmission(input); !admission.ok()) {
+            generate_context.error_status =
+                serializeErrorMsg(generate_context.request_key,
+                                  ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(admission.message())));
+        }
+    }
     CHECK_ERROR_STATUS(generate_context);
 
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
@@ -213,6 +228,21 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                     err_pb->set_error_message("multimodal processing failed: " + err.ToString());
                 } else {
                     err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+                }
+            }
+            return grpc::Status::OK;
+        }
+        if (auto admission = engine_->validateStructuredOutputAdmission(input); !admission.ok()) {
+            for (int j = 0; j < batch_size; j++) {
+                auto* result = response->add_results();
+                auto* err_pb = result->mutable_error_info();
+                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+                if (j == i) {
+                    err_pb->set_error_message("structured output admission rejected at index " + std::to_string(i)
+                                              + ": " + std::string(admission.message()));
+                } else {
+                    err_pb->set_error_message("batch aborted due to structured output admission failure at index "
+                                              + std::to_string(i));
                 }
             }
             return grpc::Status::OK;

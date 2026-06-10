@@ -1,5 +1,6 @@
 #include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
@@ -88,24 +89,83 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
-    auto generate_stream              = engine_->makeStream(input);
+    std::shared_ptr<GenerateInput> input;
+    try {
+        input = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    } catch (const std::invalid_argument& e) {
+        decode_context.error_status =
+            grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::string("invalid request: ") + e.what());
+        return;
+    }
+    auto generate_stream = engine_->makeStream(input);
+    if (generate_stream->hasError()) {
+        const auto status_info = generate_stream->statusInfo();
+        decode_context.error_status =
+            grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                         "stream creation failed: " + status_info.ToString());
+        return;
+    }
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
     // Set CanRun event so that handleWaiting() will execute initKVBlock()
     generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
 
-    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
-    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
-    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
-        this_thread::sleep_for(chrono::milliseconds(1));
+    // Drive the stream through its preparation + KV-cache allocation cycle.
+    // moveToNext polls async preparation (e.g. grammar compile) while WAITING,
+    // then transitions through LOADING_CACHE for KV-cache allocation.
+    // Loop until the stream returns to WAITING (fully ready) or errors out.
+    {
+        const int64_t begin_time_us = currentTimeUs();
+        int64_t       max_wait_timeout_ms = decode_context.request_timeout_ms;
+        if (max_wait_timeout_ms <= 0 && maga_init_params_.grammar_config.compile_timeout_ms > 0) {
+            max_wait_timeout_ms = maga_init_params_.grammar_config.compile_timeout_ms;
+        }
+        if (max_wait_timeout_ms <= 0) {
+            max_wait_timeout_ms = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms;
+        }
+        const int64_t max_wait_timeout_us = max_wait_timeout_ms * 1000;
+
+        StreamState state = StreamState::WAITING;
+        while (!generate_stream->hasError()) {
+            state = generate_stream->moveToNext();
+            if (state == StreamState::WAITING) {
+                // Check if we went through LOADING_CACHE (KV allocated)
+                // or if preparation is still pending. If preparation is done
+                // and KV is loaded, we're ready to enqueue.
+                if (!generate_stream->isPreparationPending()
+                    && generate_stream->hasEvent(StreamEvents::LoadInitiated)) {
+                    break;
+                }
+            }
+            if (max_wait_timeout_ms > 0) {
+                const int64_t cost_time_us = currentTimeUs() - begin_time_us;
+                if (cost_time_us > max_wait_timeout_us) {
+                    RTP_LLM_LOG_WARNING("request [%s] decode allocate wait timeout after %ld ms (limit=%ld ms)",
+                                        decode_context.request_key.c_str(),
+                                        static_cast<long>(cost_time_us / 1000),
+                                        static_cast<long>(max_wait_timeout_ms));
+                    generate_stream->reportEvent(StreamEvents::Error,
+                                                 ErrorCode::WAIT_TO_RUN_TIMEOUT,
+                                                 "decode allocate wait timeout, limit is "
+                                                     + std::to_string(max_wait_timeout_ms) + " ms");
+                    break;
+                }
+            }
+            this_thread::sleep_for(chrono::milliseconds(1));
+        }
     }
     if (generate_stream->hasError()) {
-        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
+        const auto status_info = generate_stream->statusInfo();
+        string     error_msg   = "request: [" + decode_context.request_key
+                             + "] allocate resource failed at decode node: " + status_info.ToString();
         RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
+        auto grpc_code = grpc::StatusCode::RESOURCE_EXHAUSTED;
+        if (status_info.code() == ErrorCode::INVALID_PARAMS
+            || status_info.code() == ErrorCode::EXECUTION_EXCEPTION) {
+            grpc_code = grpc::StatusCode::INVALID_ARGUMENT;
+        }
+        decode_context.error_status = grpc::Status(grpc_code, error_msg);
         return;
     }
 
@@ -161,20 +221,22 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     generate_stream->setIsContextStream(false);
     generate_stream->step();
 
-    auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
-
-    new_tokens.data_ptr<int32_t>()[0] = generate_request.first_generate_token_id();
+    // SGLang-style PREBUILT bonus-token ingest: record the prefill-side T0 into
+    // the output buffer and replay it into attached logits processors WITHOUT
+    // invoking the fresh-sample commit path. The full update() path triggers
+    // checkTermination on grammar matchers, which on short regexes (e.g.
+    // [0-9]{5} encoded as a single multi-digit token) closes the stream before
+    // the decode side has emitted anything of its own. ingestPdBonusToken
+    // separates "synchronize state with transferred token" from "commit a
+    // freshly-sampled token".
+    if (generate_stream->isPreparationPending()) {
+        RTP_LLM_LOG_WARNING(
+            "[grammar] PD localGenerate stream [%ld]: grammar preparation still pending "
+            "before bonus-token ingest — matcher replay may be deferred",
+            generate_stream->streamId());
+    }
     generate_stream->incLastOutputPos();
-    generate_stream->update({new_tokens,
-                             1,
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor(),
-                             torch::Tensor()});
+    generate_stream->ingestPdBonusToken(generate_request.first_generate_token_id());
     if (generate_request.position_ids_size() > 0) {
         auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
                                                      {(int64_t)generate_request.position_ids_size()},

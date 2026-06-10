@@ -105,6 +105,11 @@ message GenerateConfigPB {
     IntMatrix banned_combo_token_ids = 59;
     // 0=unset(fallback to bool return_all_probs), 1=NONE, 2=DEFAULT, 3=ORIGINAL
     int32 return_all_probs_mode = 60;
+    google.protobuf.StringValue json_schema = 65;
+    google.protobuf.StringValue regex = 66;
+    google.protobuf.StringValue ebnf = 67;
+    google.protobuf.StringValue structural_tag = 68;
+    google.protobuf.StringValue response_format = 69;
 }
 
 message MMPreprocessConfigPB {

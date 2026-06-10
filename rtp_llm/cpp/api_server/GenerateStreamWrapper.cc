@@ -13,6 +13,9 @@ void GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
     input_ids_       = input->input_ids;
     generate_config_ = input->generate_config;
     stream_          = engine->enqueue(input);
+    if (stream_->hasError()) {
+        throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR, stream_->statusInfo().ToString());
+    }
 }
 
 void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr<EngineBase>& engine) {

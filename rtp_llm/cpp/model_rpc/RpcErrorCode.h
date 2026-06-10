@@ -13,6 +13,9 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         {ErrorCode::MALLOC_FAILED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::DECODE_MALLOC_FAILED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::GENERATE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::WAIT_TO_RUN_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::INVALID_PARAMS, grpc::StatusCode::INVALID_ARGUMENT},
+        {ErrorCode::ERROR_GENERATE_CONFIG_FORMAT, grpc::StatusCode::INVALID_ARGUMENT},
         {ErrorCode::OUT_OF_VOCAB_RANGE, grpc::StatusCode::OUT_OF_RANGE},
         {ErrorCode::LONG_PROMPT_ERROR, grpc::StatusCode::OUT_OF_RANGE},
     };

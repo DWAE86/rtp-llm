@@ -5,8 +5,10 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <unistd.h>
 #include <limits.h>
 #include <c10/core/InferenceMode.h>
@@ -89,7 +91,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
+    const int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
         usleep(100);
@@ -110,7 +112,14 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    std::shared_ptr<GenerateInput> input;
+    try {
+        input = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    } catch (const std::invalid_argument& e) {
+        prefill_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
     input->generate_config->pd_separation = true;
     if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
@@ -219,6 +228,15 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
+    if (auto admission = engine_->validateStructuredOutputAdmission(prefill_context.generate_input); !admission.ok()) {
+        prefill_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(admission.message()));
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        RTP_LLM_LOG_INFO("[structured_output_admission] rejected prefill request [%ld]: %s",
+                         prefill_context.request_id,
+                         admission.message().data());
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
@@ -386,7 +404,18 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
             return;
         }
+        if (response.flatten_output().aux_info_size() > 0) {
+            const auto& aux = response.flatten_output().aux_info(0);
+            RTP_LLM_LOG_DEBUG(
+                "[pd_trace] pollRemoteOutput decode chunk request=%ld iter_count=%d "
+                "output_len=%d step_output_len=%d",
+                request_id,
+                aux.iter_count(),
+                aux.output_len(),
+                aux.step_output_len());
+        }
     }
+    RTP_LLM_LOG_DEBUG("[pd_trace] pollRemoteOutput done request=%ld", prefill_context.request_id);
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
 }

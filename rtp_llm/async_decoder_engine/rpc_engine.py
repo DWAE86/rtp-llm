@@ -1,15 +1,15 @@
 import logging
 import time
-from typing import Dict, Optional
+from typing import Optional
 
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.async_decoder_engine.xgrammar_bootstrap import bootstrap_grammar_config
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
 from rtp_llm.ops import RoleType, TaskType, VitSeparation
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
@@ -61,6 +61,14 @@ class LanguageCppEngine(BaseEngine):
                     device=f"cuda:{engine_config.parallelism_config.local_rank}",
                 )
             )
+
+        # One-shot xgrammar bootstrap: poke the HF tokenizer for vocab /
+        # backend_tokenizer / eos, delegate the xgrammar-specific JSON
+        # assembly to the pybind helper, and stash the result on
+        # grammar_config. After this call the C++ engine builds
+        # XGrammarBackendCpp natively with no further Python hop.
+        bootstrap_grammar_config(engine_config, model)
+
         self.rtp_llm_op_ = RtpLLMOp(
             engine_config,
             model,
