@@ -82,7 +82,7 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     const StreamGroups&                         stream_groups,
     const GptModelInputs&                       model_inputs,
     const GptModelOutputs&                      model_output,
-    const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
+    const MtpSpecLogitsVerifyResult& spec_logits_result) const {
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto               all_streams      = stream_groups.allStreams();
@@ -103,7 +103,6 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     if (spec_logits_result.has_active_processor) {
         sampler_inputs.spec_vocab_mask_gpu     = spec_logits_result.spec_vocab_mask_gpu;
         sampler_inputs.spec_cap_gpu            = spec_logits_result.spec_cap_gpu;
-        sampler_inputs.spec_mask_ready_event   = spec_logits_result.ready_event;
         sampler_inputs.spec_applied_processors = spec_logits_result.applied_processors;
         sampler_inputs.spec_propose_step       = static_cast<int>(propose_step_);
     }

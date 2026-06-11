@@ -13,10 +13,10 @@
 
 // White-box access to GrammarCompiler / GrammarLogitsProcessor privates is
 // provided by the -fno-access-control copt in this test's BUILD target (matching
-// XGrammarBackendCppTest). Do NOT add `#define private public` here.
+// XGrammarBackendTest). Do NOT add `#define private public` here.
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarCompiler.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -32,7 +32,7 @@ namespace {
 
 // 128-char ASCII vocab — enough for xgrammar to build the trie and compile a
 // JSON grammar. "$$ANY$$" maps to the builtin JSON grammar (see
-// XGrammarBackendCppTest), which compiles reliably against this vocab.
+// XGrammarBackendTest), which compiles reliably against this vocab.
 std::string makeAsciiTokenizerInfoJson() {
     std::vector<std::string> vocab;
     vocab.reserve(128);
@@ -112,7 +112,7 @@ protected:
 // ── GrammarCompiler (worker pool + singleflight + cache) ────────────────────
 
 TEST_F(GrammarCompilerTest, SubmitCompilesValidSchemaThenServesFromCache) {
-    auto            backend = std::make_shared<XGrammarBackendCpp>(makeAsciiTokenizerInfoJson(), backendOptionsForTest());
+    auto            backend = std::make_shared<XGrammarBackend>(makeAsciiTokenizerInfoJson(), backendOptionsForTest());
     GrammarCompiler compiler(backend, GrammarConfig{});
     ASSERT_TRUE(compiler.enabled());
 
@@ -130,7 +130,7 @@ TEST_F(GrammarCompilerTest, SubmitCompilesValidSchemaThenServesFromCache) {
 }
 
 TEST_F(GrammarCompilerTest, SubmitMalformedSchemaIsInvalidAndCached) {
-    auto            backend = std::make_shared<XGrammarBackendCpp>(makeAsciiTokenizerInfoJson(), backendOptionsForTest());
+    auto            backend = std::make_shared<XGrammarBackend>(makeAsciiTokenizerInfoJson(), backendOptionsForTest());
     GrammarCompiler compiler(backend, GrammarConfig{});
 
     GrammarKeyCpp key{"json", "{this is not json at all"};
@@ -254,8 +254,7 @@ TEST_F(GrammarCompilerTest, TimeoutReportsTimeoutNotInvalid) {
 
     auto prep                = std::shared_ptr<GrammarLogitsProcessor>(new GrammarLogitsProcessor());
     prep->kind_              = GrammarLogitsProcessor::Kind::Compile;
-    prep->key_               = GrammarKeyCpp{"json", "$$ANY$$"};
-    prep->require_reasoning_ = false;
+    prep->key_    = GrammarKeyCpp{"json", "$$ANY$$"};
     prep->future_            = never_promise.get_future().share();
     prep->deadline_          = std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
 

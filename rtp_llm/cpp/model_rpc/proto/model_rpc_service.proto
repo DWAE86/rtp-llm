@@ -110,6 +110,7 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 67;
     google.protobuf.StringValue structural_tag = 68;
     google.protobuf.StringValue response_format = 69;
+    repeated int32 begin_think_token_ids = 70;
 }
 
 message MMPreprocessConfigPB {

@@ -217,22 +217,35 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     generate_stream->setIsContextStream(false);
     generate_stream->step();
 
-    // SGLang-style PREBUILT bonus-token ingest: record the prefill-side T0 into
-    // the output buffer and replay it into attached logits processors WITHOUT
-    // invoking the fresh-sample commit path. The full update() path triggers
-    // checkTermination on grammar matchers, which on short regexes (e.g.
-    // [0-9]{5} encoded as a single multi-digit token) closes the stream before
-    // the decode side has emitted anything of its own. ingestPdBonusToken
-    // separates "synchronize state with transferred token" from "commit a
-    // freshly-sampled token".
+    // PD T0 commit goes through the universal update() path. updateStatus on
+    // attached processors only advances internal state; stream termination is
+    // delegated to the EOS sampler path (DeviceMaskMode::TERMINATED forces
+    // EOS, matchEosToken closes the stream), so a saturated short regex no
+    // longer closes the stream before decode samples.
     if (generate_stream->isPreparationPending()) {
-        RTP_LLM_LOG_WARNING(
+        RTP_LLM_LOG_DEBUG(
             "[grammar] PD localGenerate stream [%ld]: grammar preparation still pending "
-            "before bonus-token ingest — matcher replay may be deferred",
+            "before bonus-token commit — matcher replay deferred to installMatcher",
             generate_stream->streamId());
     }
     generate_stream->incLastOutputPos();
-    generate_stream->ingestPdBonusToken(generate_request.first_generate_token_id());
+    {
+        auto bonus_tokens =
+            torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
+        bonus_tokens.data_ptr<int32_t>()[0] = generate_request.first_generate_token_id();
+        StreamUpdateInfo bonus_info{bonus_tokens,
+                                    /*num_new_tokens=*/1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    /*update_remote_generate=*/false};
+        generate_stream->update(bonus_info);
+    }
     if (generate_request.position_ids_size() > 0) {
         auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
                                                      {(int64_t)generate_request.position_ids_size()},

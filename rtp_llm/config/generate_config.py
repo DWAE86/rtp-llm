@@ -100,6 +100,7 @@ class GenerateConfig(BaseModel):
     )
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     end_think_token_ids: List[int] = []
+    begin_think_token_ids: List[int] = []
     num_beams: int = 1
     variable_num_beams: List[int] = []
     do_sample: bool = True
@@ -473,6 +474,13 @@ class GenerateConfig(BaseModel):
                     f"response_format is not valid JSON: {e}",
                 )
 
+        if self._grammar_constraint_count(parsed_response_format) > 1:
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "only one grammar constraint (json_schema / regex / ebnf / "
+                "structural_tag / grammar response_format) may be set per request",
+            )
+
         # Grammar-constrained decoding advances the matcher one token at a
         # time, but NormalOutputDispatcher skips that advance under beam
         # search (num_beams > 1 / num_return_sequences > 1), so the matcher
@@ -494,3 +502,19 @@ class GenerateConfig(BaseModel):
                 or self.ebnf is not None or self.structural_tag is not None:
             return True
         return _response_format_is_grammar(self.response_format, parsed_response_format)
+
+    def _grammar_constraint_count(
+        self, parsed_response_format: Optional[Dict[str, Any]] = None
+    ) -> int:
+        count = 0
+        if self.json_schema is not None:
+            count += 1
+        if self.regex is not None:
+            count += 1
+        if self.ebnf is not None:
+            count += 1
+        if self.structural_tag is not None:
+            count += 1
+        if _response_format_is_grammar(self.response_format, parsed_response_format):
+            count += 1
+        return count

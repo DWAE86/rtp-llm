@@ -1,10 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 
 namespace rtp_llm {
@@ -60,9 +64,8 @@ enum class PrepareState { Pending, Ready, Failed };
 
 // BaseLogitsProcessor is the interface every logits-processor implements: a
 // per-batch process(), per-stream status-update hooks, and an optional
-// metrics-reporting hook. GrammarLogitsProcessor extends it with the
-// vocabulary-restricting grammar mask plus whole-batch spec-decoding hooks (see
-// GrammarLogitsProcessor.h); pure bias processors (ThinkMode, MultiSeq, ...)
+// metrics-reporting hook. Grammar processors also implement SpecLogitsProcessor
+// for MTP verify bitmasks; pure bias processors (ThinkMode, MultiSeq, ...)
 // implement only this base.
 class BaseLogitsProcessor {
 public:
@@ -72,13 +75,6 @@ public:
 
 public:
     virtual void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) = 0;
-    virtual void processSpeculative(const SamplerInputs&        inputs,
-                                    size_t                      start_idx,
-                                    size_t                      finish_idx,
-                                    const std::vector<int32_t>& draft_prefix) {
-        (void)draft_prefix;
-        process(inputs, start_idx, finish_idx);
-    }
     virtual void updateMultiSeqStatus(const std::vector<int>& src_batch_indices)           = 0;
 
     // Optional asynchronous pre-run preparation (e.g. grammar compile). See the
@@ -102,6 +98,21 @@ public:
     // that don't need a stream reference.
     virtual void setStream(const std::shared_ptr<GenerateStream>& /*stream*/) {}
 
+    // ErrorReporter callback (B5, dsv4-style). Decouples processors from
+    // GenerateStream weak_ptr for error-up-the-stack: GenerateStream injects a
+    // callback that internally picks reportError vs reportErrorWithoutLock based
+    // on whether the caller already holds stream->mutex_.
+    //   stream_lock_held = true  -> calls reportErrorWithoutLock
+    //   stream_lock_held = false -> calls reportError (acquires mutex_)
+    // The callback is no-op if the stream is gone (weak_ptr expired).
+    using ErrorReporter = std::function<void(ErrorCode, const std::string&, bool stream_lock_held)>;
+    void setErrorReporter(ErrorReporter cb) { error_reporter_ = std::move(cb); }
+    void reportErrorViaReporter(ErrorCode code, const std::string& msg, bool stream_lock_held) {
+        if (error_reporter_) {
+            error_reporter_(code, msg, stream_lock_held);
+        }
+    }
+
     // ENGINE INVARIANT: updateStatus is called exactly once for every token
     // (or per-stream commit batch) that GenerateStream commits to the
     // stream's output, regardless of which path produced it:
@@ -118,25 +129,14 @@ public:
     // T0 regression for the historical motivation).
     virtual void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) = 0;
 
-    // PD-decode "PREBUILT" replay hook: synchronize processor state with token(s)
-    // that were already sampled on the prefill side and merely transferred over.
-    // Unlike updateStatus, this MUST NOT trigger termination side effects
-    // (markFinished / GenerateDone) — the bonus token is not a fresh sampling
-    // event; the decode-side first-mask-and-sample step decides termination.
-    // Stateless processors leave this as a no-op.
-    virtual void replayCommittedTokens(const std::vector<int32_t>& /*tokens*/) {}
-
-    // PD-decode replay follow-up: if grammar already completed during replay
-    // (e.g. single-token regex saturation), end the stream now that bonus T0
-    // is visible in the output queue. Matches SGLang PREBUILT
-    // grammar.finished = req.finished() without treating replay as a fresh commit.
-    virtual void finalizeAfterReplayIfComplete() {}
-
     void          memFill(const torch::Tensor& new_tokens_logits, size_t vocab_size, size_t index);
     void          maskLogits(torch::Tensor& new_token_logits, const torch::Tensor& vocab_mask);
     torch::Tensor generateVocabMask(size_t                                  batch_size,
                                     size_t                                  vocab_size,
                                     const std::vector<std::vector<size_t>>& batch_candidate_token_ids);
+
+protected:
+    ErrorReporter error_reporter_;
 };
 
 typedef std::shared_ptr<BaseLogitsProcessor> BaseLogitsProcessorPtr;

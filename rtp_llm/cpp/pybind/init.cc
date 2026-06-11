@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/pybind/XGrammarBootstrap.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
 #include "pybind11/pybind11.h"
@@ -42,7 +41,6 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);
-    registerXGrammarBootstrap(m);
 }
 
 }  // namespace rtp_llm

@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
-#include "rtp_llm/cpp/engine_base/StructuredOutputAdmissionPolicy.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -295,7 +294,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
     fake_input->fake_query                      = true;
-    auto stream                                 = createStream(fake_input);
+    auto stream                                 = makeStream(fake_input);
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
@@ -417,49 +416,11 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
-absl::Status NormalEngine::validateStructuredOutputAdmission(const std::shared_ptr<GenerateInput>& input) const {
-    if (!input) {
-        return absl::OkStatus();
-    }
-    const auto result = checkStructuredOutputAdmissionForConfig(
-        input->generate_config, grammar_config_, runtime_config.use_batch_decode_scheduler);
-    if (result.allowed) {
-        return absl::OkStatus();
-    }
-    return absl::InvalidArgumentError(result.message);
-}
-
-std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
+std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
     stream->initProcessorStreamRefs();
     return stream;
-}
-
-std::shared_ptr<GenerateStream> NormalEngine::createAdmissionRejectedStream(
-    const std::shared_ptr<GenerateInput>& input, const absl::Status& status) {
-    auto stripped_input = std::make_shared<GenerateInput>();
-    *stripped_input     = *input;
-    stripped_input->generate_config = std::make_shared<GenerateConfig>(*input->generate_config);
-    auto& cfg                       = *stripped_input->generate_config;
-    cfg.json_schema.reset();
-    cfg.regex.reset();
-    cfg.ebnf.reset();
-    cfg.structural_tag.reset();
-    cfg.response_format.reset();
-    auto stream = createStream(stripped_input);
-    stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, std::string(status.message()));
-    return stream;
-}
-
-std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
-    if (auto status = validateStructuredOutputAdmission(input); !status.ok()) {
-        RTP_LLM_LOG_INFO("[structured_output_admission] rejected makeStream request %ld: %s",
-                         input ? input->request_id : -1,
-                         status.message().data());
-        return createAdmissionRejectedStream(input, status);
-    }
-    return createStream(input);
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
@@ -468,13 +429,9 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    if (auto status = validateStructuredOutputAdmission(input); !status.ok()) {
-        RTP_LLM_LOG_INFO("[structured_output_admission] rejected enqueue request %ld: %s",
-                         input ? input->request_id : -1,
-                         status.message().data());
-        return createAdmissionRejectedStream(input, status);
-    }
-    std::shared_ptr<GenerateStream> stream = createStream(input);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
+        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->initProcessorStreamRefs();
     stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
     return stream;
@@ -484,25 +441,14 @@ std::vector<std::shared_ptr<GenerateStream>>
 NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
     std::vector<std::shared_ptr<GenerateStream>> streams;
     streams.reserve(inputs.size());
-    std::vector<std::shared_ptr<GenerateStream>> to_enqueue;
-    to_enqueue.reserve(inputs.size());
     for (auto& inp : inputs) {
-        if (auto status = validateStructuredOutputAdmission(inp); !status.ok()) {
-            RTP_LLM_LOG_WARNING("[structured_output_admission] rejected batch enqueue request %ld: %s",
-                                inp ? inp->request_id : -1,
-                                status.message().data());
-            streams.push_back(createAdmissionRejectedStream(inp, status));
-        } else {
-            auto stream = createStream(inp);
-            stream->setReserveStep(reserve_step_);
-            to_enqueue.push_back(stream);
-            streams.push_back(std::move(stream));
-        }
+        auto stream = std::make_shared<NormalGenerateStream>(
+            inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        stream->initProcessorStreamRefs();
+        stream->setReserveStep(reserve_step_);
+        streams.push_back(stream);
     }
-    if (!to_enqueue.empty()) {
-        (void)scheduler_->batchEnqueue(to_enqueue);
-    }
-    return streams;
+    return scheduler_->batchEnqueue(streams);
 }
 
 absl::Status NormalEngine::step() {

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
 
 #include <cassert>
 #include <chrono>
@@ -89,7 +89,7 @@ void sanitizeLegacyStructures(JsonMap& root) {
 
 }  // namespace
 
-std::string XGrammarBackendCpp::sanitizeStructuralTag(const std::string& tag_json) {
+std::string XGrammarBackend::sanitizeStructuralTag(const std::string& tag_json) {
     // Parse → mutate → re-serialize. On any parse/serialize failure return
     // input unchanged so xgrammar's own InvalidGrammar path takes over.
     autil::legacy::Any any;
@@ -115,7 +115,7 @@ std::string XGrammarBackendCpp::sanitizeStructuralTag(const std::string& tag_jso
     }
 }
 
-XGrammarBackendCpp::XGrammarBackendCpp(const std::string&            tokenizer_info_json,
+XGrammarBackend::XGrammarBackend(const std::string&            tokenizer_info_json,
                                        const XGrammarBackendOptions& options):
     options_(options),
     tokenizer_info_([&] {
@@ -126,30 +126,28 @@ XGrammarBackendCpp::XGrammarBackendCpp(const std::string&            tokenizer_i
         }
         std::string msg;
         std::visit([&msg](const auto& err) { msg = err.what(); }, std::get<1>(result));
-        throw std::runtime_error(std::string("XGrammarBackendCpp: failed to deserialize TokenizerInfo: ") + msg);
+        throw std::runtime_error(std::string("XGrammarBackend: failed to deserialize TokenizerInfo: ") + msg);
     }()),
     compiler_(tokenizer_info_,
               std::max(1, options.max_compiler_threads),
               options.enable_compiler_cache,
               options.compiler_cache_bytes) {
     RTP_LLM_LOG_INFO(
-        "XGrammarBackendCpp init: vocab_size=%d, any_whitespace=%d, strict_mode=%d, "
-        "compiler_threads=%d, compiler_cache=%d, compiler_cache_bytes=%lld, "
-        "think_end_id=%s",
+        "XGrammarBackend init: vocab_size=%d, any_whitespace=%d, strict_mode=%d, "
+        "compiler_threads=%d, compiler_cache=%d, compiler_cache_bytes=%lld",
         tokenizer_info_.GetVocabSize(),
         static_cast<int>(options_.any_whitespace),
         static_cast<int>(options_.strict_mode),
         std::max(1, options_.max_compiler_threads),
         static_cast<int>(options_.enable_compiler_cache),
-        static_cast<long long>(options_.compiler_cache_bytes),
-        options_.think_end_id.has_value() ? std::to_string(*options_.think_end_id).c_str() : "<none>");
+        static_cast<long long>(options_.compiler_cache_bytes));
 
 }
 
 
-XGrammarBackendCpp::~XGrammarBackendCpp() = default;
+XGrammarBackend::~XGrammarBackend() = default;
 
-std::shared_ptr<xgrammar::CompiledGrammar> XGrammarBackendCpp::getCached(const GrammarKeyCpp& key) const {
+std::shared_ptr<xgrammar::CompiledGrammar> XGrammarBackend::getCached(const GrammarKeyCpp& key) const {
     const std::string           kid = key.id();
     std::lock_guard<std::mutex> lock(cache_mutex_);
     auto                        it = cache_.find(kid);
@@ -161,7 +159,7 @@ std::shared_ptr<xgrammar::CompiledGrammar> XGrammarBackendCpp::getCached(const G
     return it->second.compiled;
 }
 
-std::string XGrammarBackendCpp::getCachedInvalid(const GrammarKeyCpp& key) const {
+std::string XGrammarBackend::getCachedInvalid(const GrammarKeyCpp& key) const {
     const std::string           kid = key.id();
     std::lock_guard<std::mutex> lock(cache_mutex_);
     auto                        it = invalid_cache_.find(kid);
@@ -172,7 +170,7 @@ std::string XGrammarBackendCpp::getCachedInvalid(const GrammarKeyCpp& key) const
     return it->second.error_message;
 }
 
-void XGrammarBackendCpp::setCache(const GrammarKeyCpp&                       key,
+void XGrammarBackend::setCache(const GrammarKeyCpp&                       key,
                                   std::shared_ptr<xgrammar::CompiledGrammar> compiled) {
     if (!compiled) {
         return;  // use setCacheInvalid for nullptrs.
@@ -201,7 +199,7 @@ void XGrammarBackendCpp::setCache(const GrammarKeyCpp&                       key
     }
 }
 
-void XGrammarBackendCpp::setCacheInvalid(const GrammarKeyCpp& key, const std::string& error_message) {
+void XGrammarBackend::setCacheInvalid(const GrammarKeyCpp& key, const std::string& error_message) {
     const std::string           kid = key.id();
     std::lock_guard<std::mutex> lock(cache_mutex_);
 
@@ -227,7 +225,7 @@ void XGrammarBackendCpp::setCacheInvalid(const GrammarKeyCpp& key, const std::st
 }
 
 // Thread-safe: xgrammar::GrammarCompiler uses ThreadSafeLRUCache (shared_mutex + shared_future) internally.
-CompileResult XGrammarBackendCpp::compileNow(const GrammarKeyCpp& key) {
+CompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
     const auto t_start = std::chrono::steady_clock::now();
 
     // Wrap an xgrammar Compile* call: grammar/schema rejection exceptions
@@ -275,14 +273,14 @@ CompileResult XGrammarBackendCpp::compileNow(const GrammarKeyCpp& key) {
                                 std::chrono::steady_clock::now() - t_start)
                                 .count();
     if (result.compiled) {
-        RTP_LLM_LOG_DEBUG("XGrammarBackendCpp compile OK: type=%s, len=%zu, elapsed_ms=%lld, bytes=%zu",
+        RTP_LLM_LOG_DEBUG("XGrammarBackend compile OK: type=%s, len=%zu, elapsed_ms=%lld, bytes=%zu",
                           key.key_type.c_str(),
                           key.key_string.size(),
                           static_cast<long long>(elapsed_ms),
                           result.compiled->MemorySizeBytes());
     } else {
         RTP_LLM_LOG_WARNING(
-            "XGrammarBackendCpp compile FAIL: type=%s, len=%zu, elapsed_ms=%lld, invalid=%d, err=%s",
+            "XGrammarBackend compile FAIL: type=%s, len=%zu, elapsed_ms=%lld, invalid=%d, err=%s",
             key.key_type.c_str(),
             key.key_string.size(),
             static_cast<long long>(elapsed_ms),
@@ -293,17 +291,20 @@ CompileResult XGrammarBackendCpp::compileNow(const GrammarKeyCpp& key) {
 }
 
 std::unique_ptr<RtpGrammarMatcher>
-XGrammarBackendCpp::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled, bool require_reasoning) {
+XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
+                                    bool                                       terminate_without_stop_token,
+                                    bool                                       require_reasoning,
+                                    std::vector<int>                           think_end_token_ids) {
     assert(compiled && "createMatcher requires a non-null CompiledGrammar");
     return std::make_unique<RtpGrammarMatcher>(std::move(compiled),
-                                               require_reasoning,
-                                               options_.think_end_id,
-                                               options_.think_start_id,
                                                options_.override_stop_tokens,
-                                               /*max_rollback_tokens=*/200);
+                                               terminate_without_stop_token,
+                                               /*max_rollback_tokens=*/200,
+                                               require_reasoning,
+                                               std::move(think_end_token_ids));
 }
 
-void XGrammarBackendCpp::clear() {
+void XGrammarBackend::clear() {
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         cache_.clear();
@@ -312,7 +313,7 @@ void XGrammarBackendCpp::clear() {
         invalid_lru_.clear();
     }
     compiler_.ClearCache();
-    RTP_LLM_LOG_INFO("XGrammarBackendCpp clear: caches dropped");
+    RTP_LLM_LOG_INFO("XGrammarBackend clear: caches dropped");
 }
 
 }  // namespace rtp_llm

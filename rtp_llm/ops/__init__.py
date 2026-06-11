@@ -133,6 +133,7 @@ try:
         PDSepConfig,
         ParallelismConfig,
         ProfilingDebugLoggingConfig,
+        ReasoningConfig,
         RopeCache,
         RopeConfig,
         RopeStyle,
@@ -208,13 +209,11 @@ try:
 
     from libth_transformer import RtpEmbeddingOp, RtpLLMOp
     from libth_transformer import EmbeddingCppOutput
-    from libth_transformer import build_xgrammar_tokenizer_info_json
 
     libth_transformer_imported = True
 except BaseException as e:
     libth_transformer_imported = False
     EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = EmptyClass
-    build_xgrammar_tokenizer_info_json = None  # type: ignore[assignment]
 
     logging.info(
         "libth_transformer not imported, you may under python standalone mode or frontend mode now."

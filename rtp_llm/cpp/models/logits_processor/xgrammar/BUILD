@@ -18,12 +18,11 @@ cc_library(
     name = "grammar_cpp_lib",
     hdrs = [
         "RtpGrammarMatcher.h",
-        "StreamGrammarState.h",
-        "XGrammarBackendCpp.h",
+        "XGrammarBackend.h",
     ],
     srcs = [
         "RtpGrammarMatcher.cc",
-        "XGrammarBackendCpp.cc",
+        "XGrammarBackend.cc",
     ],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
@@ -93,5 +92,17 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/utils:core_utils",
     ],
+    copts = copts(),
+)
+
+cc_library(
+    name = "xgrammar_bootstrap",
+    srcs = ["XGrammarBootstrap.cc"],
+    hdrs = ["XGrammarBootstrap.h"],
+    deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@xgrammar//:xgrammar",
+    ] + torch_deps(),
     copts = copts(),
 )

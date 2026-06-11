@@ -128,23 +128,7 @@ public:
     void         update(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
 
-    // PD-decode "PREBUILT" bonus-token ingest. Mirrors the SGLang invariant:
-    // the prefill node already sampled T0 (under its own grammar mask) and
-    // forwarded it; the decode node must record T0 into the output stream and
-    // synchronize attached logits processors with it, but MUST NOT treat the
-    // bonus as a fresh sampling commit. Concretely: append to the token buffer
-    // and the user-visible output queue (so the client sees T0), then call the
-    // processor's replayCommittedTokens hook — which advances matcher state
-    // without triggering checkTermination / markFinished / GenerateDone. The
-    // first decode-side mask+sample is the legitimate termination decision
-    // point, not the prefill-side bonus.
-    //
-    // Replaces a stale localGenerate path that did update({T0}) and thus drove
-    // notifyCommit -> updateStatus -> checkTermination — closing the stream
-    // mid-regex on short patterns whose first token already saturates the DFA
-    // (e.g. `[0-9]{5}` whose tokenizer fuses 4-5 digits into one token).
-    void         ingestPdBonusToken(int32_t bonus_token);
-    bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
+    bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -485,12 +469,24 @@ public:
     }
 
     // Post-construction init: set stream back-references on processors that
-    // need it (e.g. GrammarLogitsProcessor for PD token replay). Must be called
-    // after make_shared so shared_from_this() is valid.
+    // need it (e.g. GrammarLogitsProcessor for PD token replay) and inject the
+    // ErrorReporter callback (B5, dsv4-style decoupling). Must be called after
+    // make_shared so shared_from_this() is valid.
     void initProcessorStreamRefs() {
+        std::weak_ptr<GenerateStream> weak = shared_from_this();
+        auto reporter = [weak](ErrorCode code, const std::string& msg, bool stream_lock_held) {
+            if (auto s = weak.lock()) {
+                if (stream_lock_held) {
+                    s->reportErrorWithoutLock(code, msg);
+                } else {
+                    s->reportError(code, msg);
+                }
+            }
+        };
         for (auto& p : logits_processor_list_) {
             if (p) {
                 p->setStream(shared_from_this());
+                p->setErrorReporter(reporter);
             }
         }
     }

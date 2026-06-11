@@ -18,7 +18,7 @@ cc_test(
 
 cc_test(
     name = "xgrammar_backend_cpp_test",
-    srcs = ["XGrammarBackendCppTest.cc"],
+    srcs = ["XGrammarBackendTest.cc"],
     deps = test_deps + [
         "//rtp_llm/cpp/models/logits_processor/xgrammar:grammar_cpp_lib",
     ],

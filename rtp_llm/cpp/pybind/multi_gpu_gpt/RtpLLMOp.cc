@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBootstrap.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 
 using namespace std;
@@ -208,14 +209,13 @@ EngineInitParams RtpLLMOp::initModel(py::object model,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
-        params.nccl_comm_config           = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
-        params.server_config              = engine_config.attr("server_config");
-        // GrammarConfig carries both user-tunable knobs and bootstrap fields
-        // (tokenizer_info_json / override_stop_tokens / think_end_id).
-        // Bootstrap is done entirely in Python before RtpLLMOp construction
-        // (see rpc_engine.py -> bootstrap_grammar_config), so the config we
-        // see here already has tokenizer_info_json populated.
-        params.grammar_config = engine_config.attr("grammar_config").cast<GrammarConfig>();
+        params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
+        params.server_config    = engine_config.attr("server_config");
+        params.grammar_config   = engine_config.attr("grammar_config").cast<GrammarConfig>();
+        params.reasoning_config = engine_config.attr("reasoning_config").cast<ReasoningConfig>();
+        bootstrapGrammarConfigFromModel(model, params.grammar_config, params.reasoning_config);
+        engine_config.attr("grammar_config")   = params.grammar_config;
+        engine_config.attr("reasoning_config") = params.reasoning_config;
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init

@@ -63,23 +63,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Structured-output request admission (engine-level, pre-stream).
-cc_library(
-    name = "structured_output_admission",
-    hdrs = [
-        "StructuredOutputAdmissionPolicy.h",
-    ],
-    srcs = [
-        "StructuredOutputAdmissionPolicy.cc",
-    ],
-    deps = [
-        "//rtp_llm/cpp/engine_base/stream:generate_config",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/utils:error_code",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 # Main engine base class
 cc_library(
     name = "engine_base",

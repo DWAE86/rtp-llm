@@ -338,13 +338,12 @@ struct FIFOSchedulerConfig {
 };
 
 // Config data for token-constraint decoding (grammar / DFA / ... — any
-// kind that restricts the legal next-token set). Fields fall into two
-// groups; future backends should add their own optional sub-block instead
-// of growing the top-level struct.
+// kind that restricts the legal next-token set). Future backends should
+// add their own optional sub-block instead of growing the top-level
+// struct.
 //
-//   * backend-agnostic: grammar_backend, reasoning_parser,
-//     compile_timeout_ms, override_stop_tokens, think_end_id — apply
-//     to any constraint backend.
+//   * backend-agnostic: grammar_backend, compile_timeout_ms,
+//     override_stop_tokens — apply to any constraint backend.
 //   * xgrammar-specific: constrained_json_disable_any_whitespace,
 //     num_workers, tokenizer_info_json — meaningful only when
 //     grammar_backend == "xgrammar".
@@ -355,28 +354,37 @@ struct FIFOSchedulerConfig {
 struct StructuredOutputConfig {
     // ── backend-agnostic ─────────────────────────────────────────────
     // Backend selector: "xgrammar" / "none" / "" (disabled).
-    std::string grammar_backend                         = "xgrammar";
-    // Reasoning detector key (e.g. "qwen3", "deepseek-r1"). Empty ⇒ reasoner disabled.
-    std::string reasoning_parser                        = "";
-    int64_t     compile_timeout_ms                      = 60000;
+    std::string          grammar_backend                         = "xgrammar";
+    int64_t              compile_timeout_ms                      = 60000;
     // Empty ⇒ no override (backend uses tokenizer-derived stops).
     std::vector<int32_t> override_stop_tokens;
-    // -1 ⇒ reasoner gating disabled.
-    int64_t              think_end_id                   = -1;
-    // -1 ⇒ no think-start hint (matcher infers from think_end alone).
-    int64_t              think_start_id                 = -1;
 
     // ── xgrammar-specific ────────────────────────────────────────────
     bool        constrained_json_disable_any_whitespace = false;
     int         num_workers                             = 32;
     // Empty ⇒ grammar disabled. Serialized xgrammar::TokenizerInfo blob.
     std::string          tokenizer_info_json;
-
-    std::string to_string() const;
 };
 
 // Back-compat alias. Existing callers / pybind / pickling all keep working.
 using GrammarConfig = StructuredOutputConfig;
+
+// Reasoning / think-block configuration. Independent of the structured-
+// output backend: a request can use reasoning without grammar (renderer
+// splits <think>…</think>) and grammar without reasoning (plain JSON).
+//
+//   * reasoning_parser — detector key from
+//     rtp_llm.openai.renderers.sglang_helpers.reasoning_parser
+//     (e.g. "qwen3", "deepseek-r1"). Empty ⇒ reasoning disabled.
+//   * think_start_id / think_end_id — token ids resolved at engine init
+//     from the detector's think_start_token / think_end_token. -1 ⇒
+//     resolution skipped or failed; reasoner gating in grammar then
+//     silently falls back to plain xgrammar.
+struct ReasoningConfig {
+    std::string reasoning_parser = "";
+    int64_t     think_start_id   = -1;
+    int64_t     think_end_id     = -1;
+};
 
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;

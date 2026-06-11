@@ -30,22 +30,6 @@ def init_grammar_group_args(parser, grammar_config):
         help="Disable any-whitespace mode for constrained JSON decoding",
     )
     grammar_group.add_argument(
-        "--reasoning_parser",
-        env_name="REASONING_PARSER",
-        bind_to=(grammar_config, "reasoning_parser"),
-        type=str,
-        default="",
-        help=(
-            "Reasoning detector key. Pass a detector name from "
-            "ReasoningParser.DetectorMap (e.g. qwen3, deepseek-r1, "
-            "deepseek-v3, glm45, kimi, kimi_k2, qwen3-thinking, step3) to "
-            "enable the grammar reasoner wrapper. Empty/omit to disable. The "
-            "engine resolves the matching think_end_token at startup; if the "
-            "tokenizer cannot encode it as a single token the reasoner "
-            "silently falls back to plain xgrammar."
-        ),
-    )
-    grammar_group.add_argument(
         "--grammar_compile_timeout_ms",
         env_name="GRAMMAR_COMPILE_TIMEOUT_MS",
         bind_to=(grammar_config, "compile_timeout_ms"),
@@ -67,7 +51,7 @@ def init_grammar_group_args(parser, grammar_config):
         help=(
             "Size of the native C++ compile worker pool inside GrammarCompiler. "
             "Each worker is a std::thread that pops a queue entry and calls "
-            "directly into XGrammarBackendCpp::compileNow — no GIL, no "
+            "directly into XGrammarBackend::compileNow — no GIL, no "
             "Python ThreadPoolExecutor, no per-task py::module_ trampoline. "
             "The same value is also forwarded to xgrammar as "
             "max_compiler_threads for FSM construction. Raise under sustained "

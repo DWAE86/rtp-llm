@@ -9,7 +9,7 @@
 
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/RtpGrammarMatcher.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
 #include <gtest/gtest.h>
@@ -48,10 +48,10 @@ XGrammarBackendOptions defaultOptions() {
 
 // Build a GrammarLogitsProcessor over a regex matcher. The stream is null —
 // tryAcceptAndFillBitmask only touches the matcher, never the stream.
-std::shared_ptr<GrammarLogitsProcessor> makeProcessor(XGrammarBackendCpp& backend, const std::string& regex) {
+std::shared_ptr<GrammarLogitsProcessor> makeProcessor(XGrammarBackend& backend, const std::string& regex) {
     auto compiled = backend.compileNow({"regex", regex}).compiled;
     EXPECT_TRUE(compiled);
-    std::shared_ptr<RtpGrammarMatcher> matcher = backend.createMatcher(compiled, /*require_reasoning=*/false);
+    std::shared_ptr<RtpGrammarMatcher> matcher = backend.createMatcher(compiled);
     return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), /*stream=*/nullptr);
 }
 
@@ -70,7 +70,7 @@ constexpr int kEos = 0;  // stop token in makeAsciiTokenizerInfoJson
 // regex "ab": legal sequence is 'a' then 'b'. A fully-legal draft chain should
 // return cap == propose_step with each row constraining to the expected token.
 TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
     const int    propose_step = 2;
@@ -94,7 +94,7 @@ TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
 
 // A draft token that violates the grammar caps at that offset.
 TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
     const int    propose_step = 2;
@@ -117,7 +117,7 @@ TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
 // (after "ab"), verify must stop with cap == 2 and must NOT call acceptToken on
 // the already-terminated matcher for trailing draft tokens (including EOS).
 TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
     const int    propose_step = 3;  // one past the grammar's natural end
@@ -143,7 +143,7 @@ TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
     const int    propose_step = 3;
@@ -164,7 +164,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
     ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kA));
@@ -191,7 +191,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
 // (it rolls back any provisional accepts): a second identical call yields the
 // same cap.
 TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
     const int    propose_step = 2;
@@ -211,45 +211,8 @@ TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
     EXPECT_EQ(cap1, cap2) << "state must be unchanged across calls (rollback)";
 }
 
-TEST(GrammarLogitsProcessorTest, PreviewCommitTruncatesAfterGrammarComplete) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
-    auto               proc = makeProcessor(backend, "ab");
-
-    // Spec proposed [a,b,x] but grammar completes after "ab".
-    const std::vector<int32_t> proposed{kA, kB, kX};
-    EXPECT_EQ(proc->previewCommitTokenCount(proposed), 2);
-    EXPECT_FALSE(proc->grammarMatcher()->isTerminated());
-}
-
-TEST(GrammarLogitsProcessorTest, PreviewCommitAcceptsFullLegalPrefix) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
-    auto               proc = makeProcessor(backend, "ab");
-
-    const std::vector<int32_t> proposed{kA, kB};
-    EXPECT_EQ(proc->previewCommitTokenCount(proposed), 2);
-    EXPECT_FALSE(proc->grammarMatcher()->isTerminated()) << "preview rolls back provisional accepts";
-}
-
-TEST(GrammarLogitsProcessorTest, PreviewCommitZeroWhenGrammarAlreadyComplete) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
-    auto               proc = makeProcessor(backend, "ab");
-
-    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kA));
-    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kB));
-    EXPECT_TRUE(proc->isGrammarMatcherComplete());
-    EXPECT_EQ(proc->previewCommitTokenCount({kX}), 0);
-}
-
-TEST(GrammarLogitsProcessorTest, PreviewCommitRejectsIllegalFirstToken) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
-    auto               proc = makeProcessor(backend, "ab");
-
-    EXPECT_FALSE(proc->isGrammarMatcherComplete());
-    EXPECT_EQ(proc->previewCommitTokenCount({kX}), 0);
-}
-
 TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
@@ -265,18 +228,6 @@ TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
     req.vocab_size         = 128;
 
     EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
-    EXPECT_EQ(proc->previewCommitTokenCount({kX}), 0);
-}
-
-TEST(GrammarLogitsProcessorTest, MatcherForkPreservesAcceptedPrefix) {
-    XGrammarBackendCpp backend(makeAsciiTokenizerInfoJson(), defaultOptions());
-    auto               proc = makeProcessor(backend, "ab");
-
-    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kA));
-    auto forked = proc->grammarMatcher()->fork();
-    ASSERT_TRUE(forked);
-    EXPECT_EQ(forked->numAcceptedTokens(), proc->grammarMatcher()->numAcceptedTokens());
-    EXPECT_TRUE(forked->acceptToken(kB));
 }
 
 }  // namespace rtp_llm

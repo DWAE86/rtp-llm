@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarSchemaValidator.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include "autil/legacy/json.h"

@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarCompiler.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/StreamGrammarState.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
@@ -37,13 +37,7 @@ public:
     static BaseLogitsProcessorPtr tryCreatePending(const std::shared_ptr<GenerateInput>& input);
 
     void         process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void         processSpeculative(const SamplerInputs&        inputs,
-                                    size_t                      start_idx,
-                                    size_t                      finish_idx,
-                                    const std::vector<int32_t>& draft_prefix) override;
     void         updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
-    void         replayCommittedTokens(const std::vector<int32_t>& tokens) override;
-    void         finalizeAfterReplayIfComplete() override;
     void         updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     bool         needsPreparation() const override;
     PrepareState prepare(GenerateStream& stream) override;
@@ -58,11 +52,7 @@ public:
     int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
 
     RtpGrammarMatcher* grammarMatcher() const noexcept { return matcher_.get(); }
-    bool               isGrammarMatcherComplete() const noexcept {
-        return matcher_ && (matcher_->isTerminated() || matcher_->finished());
-    }
-    int previewCommitTokenCount(const std::vector<int32_t>& tokens);
-    bool matcherSynced() const noexcept { return matcher_synced_; }
+    bool               isGrammarMatcherComplete() const noexcept;
 
 private:
     GrammarLogitsProcessor() = default;
@@ -71,9 +61,9 @@ private:
         UNSET,
         NOOP,
         MASK,
-        PASSTHROUGH,
         TERMINATED,
         FINISHED,
+        PASSTHROUGH,  // think-body: allow all model-vocab tokens; parser frozen.
     };
 
     struct DeviceMaskState {
@@ -98,8 +88,6 @@ private:
     void            syncAcceptedTokenLenLocked();
     void            rebuildDeviceMaskStateLocked();
 
-    void checkTermination();
-    bool ensureMatcherSynced();
     bool advanceMatcher(const std::vector<int32_t>& tokens, MatcherAdvance mode, bool caller_holds_stream_lock = false);
     void logGrammarLifecycle(const char* phase, const char* source, int64_t stream_id = -1) const;
     void installMatcher(GenerateStream& stream, const GrammarReadyPayload& payload);
@@ -109,15 +97,19 @@ private:
     std::string fail_msg_;
 
     GrammarKeyCpp                           key_;
-    bool                                    require_reasoning_ = false;
     std::shared_future<GrammarReadyPayload> future_;
     std::chrono::steady_clock::time_point   deadline_;
     bool                                    resolved_ = false;
 
+    // Reasoning gate inputs captured at admission. require_reasoning_ is true
+    // when the request started inside a think body; the matcher stays in
+    // PASSTHROUGH (allow-all mask, parser frozen) until think_end_token_ids_
+    // is observed in the token stream.
+    bool             require_reasoning_   = false;
+    std::vector<int> think_end_token_ids_;
+
     std::shared_ptr<RtpGrammarMatcher> matcher_;
     std::weak_ptr<GenerateStream>      stream_;
-    bool                               matcher_synced_ = false;
-    StreamGrammarState                 grammar_state_;
 
     mutable std::mutex          state_mutex_;
     std::condition_variable     state_cv_;

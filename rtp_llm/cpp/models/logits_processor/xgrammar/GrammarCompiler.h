@@ -16,7 +16,7 @@
 #include <xgrammar/compiler.h>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
 
 namespace rtp_llm {
 
@@ -35,7 +35,7 @@ struct GrammarReadyPayload {
     int64_t                                    compile_time_us = 0;
 };
 
-// Process-level grammar compile service. Owns the XGrammarBackendCpp plus a
+// Process-level grammar compile service. Owns the XGrammarBackend plus a
 // worker pool, dedups concurrent identical compiles via shared_future
 // (singleflight), and caches results eagerly. This is the worker-pool half of
 // the former GrammarCompileGate; the scheduler-facing pre-admission "gate" is
@@ -62,7 +62,6 @@ public:
     GrammarCompiler& operator=(const GrammarCompiler&) = delete;
 
     bool    enabled() const noexcept { return backend_ != nullptr; }
-    bool    hasReasoner() const noexcept { return backend_ != nullptr && backend_->hasReasoner(); }
     int64_t compileTimeoutMs() const noexcept { return grammar_compile_timeout_ms_; }
 
     // Submit a compile request. A cache hit / cached-invalid returns an
@@ -71,19 +70,23 @@ public:
     std::shared_future<GrammarReadyPayload> submit(const GrammarKeyCpp& key);
 
     // Build a fresh per-stream matcher around an already-compiled grammar.
+    // require_reasoning + think_end_token_ids enable the in-stream think-body
+    // gate; passthrough is no-op when require_reasoning is false (default).
     std::unique_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                     bool                                       require_reasoning);
+                                                     bool                                       terminate_without_stop_token = false,
+                                                     bool                                       require_reasoning            = false,
+                                                     std::vector<int>                           think_end_token_ids          = {});
 
     // Test-only: current depth of the pending-compile queue.
     size_t pendingTasks() const;
 
 private:
-    explicit GrammarCompiler(std::shared_ptr<XGrammarBackendCpp> backend, const GrammarConfig& cfg);
+    explicit GrammarCompiler(std::shared_ptr<XGrammarBackend> backend, const GrammarConfig& cfg);
 
     // Translate a GrammarConfig into a live (enabled) backend, or nullptr when
     // structured output is disabled / the backend is unhealthy / the backend
     // name is unknown. Never throws.
-    static std::shared_ptr<XGrammarBackendCpp> buildBackend(const GrammarConfig& cfg) noexcept;
+    static std::shared_ptr<XGrammarBackend> buildBackend(const GrammarConfig& cfg) noexcept;
 
     void                                    workerLoop();
     std::shared_future<GrammarReadyPayload> makeReadyFuture(GrammarReadyPayload payload) const;
@@ -93,7 +96,7 @@ private:
         std::promise<GrammarReadyPayload> promise;
     };
 
-    std::shared_ptr<XGrammarBackendCpp> backend_;
+    std::shared_ptr<XGrammarBackend> backend_;
 
     mutable std::mutex      queue_mutex_;
     std::condition_variable worker_cv_;

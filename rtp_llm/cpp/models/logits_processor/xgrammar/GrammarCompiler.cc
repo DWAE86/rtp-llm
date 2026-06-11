@@ -32,8 +32,6 @@ size_t grammarConfigFingerprint(const GrammarConfig& cfg) {
     h        = mixFingerprint(h, std::hash<std::string>{}(cfg.grammar_backend));
     h        = mixFingerprint(h, static_cast<size_t>(cfg.constrained_json_disable_any_whitespace));
     h        = mixFingerprint(h, static_cast<size_t>(cfg.num_workers));
-    h        = mixFingerprint(h, static_cast<size_t>(cfg.think_end_id));
-    h        = mixFingerprint(h, static_cast<size_t>(cfg.think_start_id));
     for (int32_t token : cfg.override_stop_tokens) {
         h = mixFingerprint(h, static_cast<size_t>(token));
     }
@@ -47,12 +45,6 @@ XGrammarBackendOptions backendOptionsFromConfig(const GrammarConfig& cfg) {
     opts.max_compiler_threads  = std::max(1, cfg.num_workers);
     opts.enable_compiler_cache = true;
     opts.compiler_cache_bytes  = -1;
-    if (cfg.think_end_id >= 0) {
-        opts.think_end_id = static_cast<int32_t>(cfg.think_end_id);
-    }
-    if (cfg.think_start_id >= 0) {
-        opts.think_start_id = static_cast<int32_t>(cfg.think_start_id);
-    }
     if (!cfg.override_stop_tokens.empty()) {
         opts.override_stop_tokens = cfg.override_stop_tokens;
     }
@@ -60,7 +52,7 @@ XGrammarBackendOptions backendOptionsFromConfig(const GrammarConfig& cfg) {
 }
 }  // namespace
 
-std::shared_ptr<XGrammarBackendCpp> GrammarCompiler::buildBackend(const GrammarConfig& cfg) noexcept {
+std::shared_ptr<XGrammarBackend> GrammarCompiler::buildBackend(const GrammarConfig& cfg) noexcept {
     try {
         if (isDisabledName(cfg.grammar_backend) || cfg.tokenizer_info_json.empty()) {
             RTP_LLM_LOG_INFO("GrammarCompiler: structured output disabled (backend=%s, tokenizer_info_json_empty=%d)",
@@ -74,17 +66,16 @@ std::shared_ptr<XGrammarBackendCpp> GrammarCompiler::buildBackend(const GrammarC
         }
 
         XGrammarBackendOptions opts = backendOptionsFromConfig(cfg);
-        auto backend = std::make_shared<XGrammarBackendCpp>(cfg.tokenizer_info_json, opts);
+        auto backend = std::make_shared<XGrammarBackend>(cfg.tokenizer_info_json, opts);
         if (!backend) {
-            RTP_LLM_LOG_ERROR("GrammarCompiler: XGrammarBackendCpp construction returned null -> disabled");
+            RTP_LLM_LOG_ERROR("GrammarCompiler: XGrammarBackend construction returned null -> disabled");
             return nullptr;
         }
         if (!backend->isEnabled()) {
-            RTP_LLM_LOG_ERROR("GrammarCompiler: XGrammarBackendCpp reports !isEnabled() (backend unhealthy) -> disabled");
+            RTP_LLM_LOG_ERROR("GrammarCompiler: XGrammarBackend reports !isEnabled() (backend unhealthy) -> disabled");
             return nullptr;
         }
-        RTP_LLM_LOG_INFO("GrammarCompiler: xgrammar backend ready (think_end_id=%lld, override_stop_tokens=%zu, num_workers=%d)",
-                         static_cast<long long>(cfg.think_end_id),
+        RTP_LLM_LOG_INFO("GrammarCompiler: xgrammar backend ready (override_stop_tokens=%zu, num_workers=%d)",
                          cfg.override_stop_tokens.size(),
                          opts.max_compiler_threads);
         return backend;
@@ -143,7 +134,7 @@ void GrammarCompiler::resetForTest() noexcept {
     old.reset();
 }
 
-GrammarCompiler::GrammarCompiler(std::shared_ptr<XGrammarBackendCpp> backend, const GrammarConfig& cfg):
+GrammarCompiler::GrammarCompiler(std::shared_ptr<XGrammarBackend> backend, const GrammarConfig& cfg):
     backend_(std::move(backend)) {
     if (cfg.compile_timeout_ms > 0) {
         grammar_compile_timeout_ms_ = cfg.compile_timeout_ms;
@@ -234,8 +225,13 @@ std::shared_future<GrammarReadyPayload> GrammarCompiler::makeReadyFuture(Grammar
 }
 
 std::unique_ptr<RtpGrammarMatcher> GrammarCompiler::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                                  bool require_reasoning) {
-    return backend_->createMatcher(std::move(compiled), require_reasoning);
+                                                                  bool                                       terminate_without_stop_token,
+                                                                  bool                                       require_reasoning,
+                                                                  std::vector<int>                           think_end_token_ids) {
+    return backend_->createMatcher(std::move(compiled),
+                                   terminate_without_stop_token,
+                                   require_reasoning,
+                                   std::move(think_end_token_ids));
 }
 
 std::shared_future<GrammarReadyPayload> GrammarCompiler::submit(const GrammarKeyCpp& key) {

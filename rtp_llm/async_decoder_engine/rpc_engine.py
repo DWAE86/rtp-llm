@@ -5,7 +5,6 @@ from typing import Optional
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.async_decoder_engine.xgrammar_bootstrap import bootstrap_grammar_config
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
@@ -61,13 +60,6 @@ class LanguageCppEngine(BaseEngine):
                     device=f"cuda:{engine_config.parallelism_config.local_rank}",
                 )
             )
-
-        # One-shot xgrammar bootstrap: poke the HF tokenizer for vocab /
-        # backend_tokenizer / eos, delegate the xgrammar-specific JSON
-        # assembly to the pybind helper, and stash the result on
-        # grammar_config. After this call the C++ engine builds
-        # XGrammarBackendCpp natively with no further Python hop.
-        bootstrap_grammar_config(engine_config, model)
 
         self.rtp_llm_op_ = RtpLLMOp(
             engine_config,

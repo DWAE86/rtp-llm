@@ -258,13 +258,13 @@ class ServerArgsSetTest(TestCase):
 
 
 class ServerArgsGrammarConfigTest(TestCase):
-    """Cover every CLI-wired field on GrammarConfig (the five --grammar_* /
-    --constrained_json_* / --reasoning_parser args): default value, CLI binding,
-    env binding, and CLI-overrides-env. The remaining GrammarConfig fields
-    (tokenizer_info_json, think_end_id, ...) are derived at engine startup, not
-    CLI parameters, so they are out of scope here. Matters because
-    GrammarCompiler reads these *only* from the config object produced here —
-    no other code path sets them."""
+    """Cover every CLI-wired field on GrammarConfig (--grammar_* /
+    --constrained_json_*) and ReasoningConfig (--reasoning_parser): default
+    value, CLI binding, env binding, and CLI-overrides-env. The remaining
+    fields (tokenizer_info_json, think_end_id, ...) are derived at engine
+    startup, not CLI parameters, so they are out of scope here. Matters
+    because GrammarCompiler reads these *only* from the config objects
+    produced here — no other code path sets them."""
 
     def setUp(self):
         environ_backup = os.environ.copy()
@@ -290,19 +290,21 @@ class ServerArgsGrammarConfigTest(TestCase):
         return rtp_llm.server.server_args.server_args.setup_args()
 
     def test_grammar_defaults(self):
-        """All five fields match GrammarConfig.__init__ defaults when no input is given.
-        Regression guard for the wiring in grammar_group_args.init_grammar_group_args."""
+        """All five fields match defaults when no input is given.
+        Regression guard for the wiring in init_grammar_group_args /
+        init_reasoning_group_args."""
         py_env_configs = self._setup()
         g = py_env_configs.grammar_config
+        r = py_env_configs.reasoning_config
 
         self.assertEqual(g.grammar_backend, "xgrammar")
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
-        self.assertEqual(g.reasoning_parser, "")
+        self.assertEqual(r.reasoning_parser, "")
         self.assertEqual(g.compile_timeout_ms, 60000)
         self.assertEqual(g.num_workers, 32)
 
     def test_grammar_cmd_args(self):
-        """Every CLI flag binds to the right GrammarConfig field, with correct types."""
+        """Every CLI flag binds to the right config field, with correct types."""
         sys.argv = [
             "prog",
             "--grammar_backend",
@@ -317,25 +319,29 @@ class ServerArgsGrammarConfigTest(TestCase):
             "7",
         ]
 
-        g = self._setup().grammar_config
+        cfgs = self._setup()
+        g = cfgs.grammar_config
+        r = cfgs.reasoning_config
         self.assertEqual(g.grammar_backend, "none")
         self.assertEqual(g.constrained_json_disable_any_whitespace, True)
-        self.assertEqual(g.reasoning_parser, "qwen3")
+        self.assertEqual(r.reasoning_parser, "qwen3")
         self.assertEqual(g.compile_timeout_ms, 12345)
         self.assertEqual(g.num_workers, 7)
 
     def test_grammar_env_vars(self):
-        """Every env_name binds to the right GrammarConfig field."""
+        """Every env_name binds to the right config field."""
         os.environ["GRAMMAR_BACKEND"] = "none"
         os.environ["CONSTRAINED_JSON_DISABLE_ANY_WHITESPACE"] = "1"
         os.environ["REASONING_PARSER"] = "qwen3"
         os.environ["GRAMMAR_COMPILE_TIMEOUT_MS"] = "42000"
         os.environ["GRAMMAR_NUM_WORKERS"] = "5"
 
-        g = self._setup().grammar_config
+        cfgs = self._setup()
+        g = cfgs.grammar_config
+        r = cfgs.reasoning_config
         self.assertEqual(g.grammar_backend, "none")
         self.assertEqual(g.constrained_json_disable_any_whitespace, True)
-        self.assertEqual(g.reasoning_parser, "qwen3")
+        self.assertEqual(r.reasoning_parser, "qwen3")
         self.assertEqual(g.compile_timeout_ms, 42000)
         self.assertEqual(g.num_workers, 5)
 

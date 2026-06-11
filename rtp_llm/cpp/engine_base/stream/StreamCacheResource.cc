@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
-#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include <thread>
 #include <torch/extension.h>
 
@@ -127,15 +126,28 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     }
 
     // Apply side-channel data to GenerateStream
-    // 1. First token: PREBUILT-style ingest (align with DecodeRpcServer::localGenerate).
-    // Do NOT call update() — that runs notifyCommit → checkTermination and can close
-    // grammar-constrained streams after the prefill-side T0 before decode samples.
+    // 1. First token: commit through the universal update() path. updateStatus
+    // on attached processors only advances internal state; stream termination
+    // is delegated to the EOS sampler path.
     if (payload->first_token_id > 0) {
         stream->setIsContextStream(false);
         stream->step();
         stream->incLastOutputPos();
-        stream->ingestPdBonusToken(static_cast<int32_t>(payload->first_token_id));
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: ingested first_token_id=%ld via ingestPdBonusToken, stream_id=%ld",
+        auto bonus_tokens = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
+        bonus_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
+        StreamUpdateInfo bonus_info{bonus_tokens,
+                                    /*num_new_tokens=*/1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    /*update_remote_generate=*/false};
+        stream->update(bonus_info);
+        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: committed first_token_id=%ld via update(), stream_id=%ld",
                           payload->first_token_id,
                           stream->streamId());
     }

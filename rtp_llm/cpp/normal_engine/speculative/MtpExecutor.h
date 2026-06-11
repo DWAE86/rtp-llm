@@ -4,13 +4,12 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
-#include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
-#include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpSpecLogitsVerifyTypes.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
@@ -104,16 +103,17 @@ protected:
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t);
 
-    SpecLogitsVerifyRunner::LaunchResult
-    buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
-                                const torch::Tensor&                draft_tokens,
-                                std::shared_ptr<torch::Event>       draft_tokens_ready_event);
+    MtpSpecLogitsVerifyResult buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
+                                                          const torch::Tensor&                draft_tokens);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
 private:
+    void ensureSpecLogitsBuffersFit(size_t total_streams, int propose_step, size_t vocab_size, size_t bitmask_words);
+    void materializeDraftTokensToCpu(size_t total_streams, int propose_step, const torch::Tensor& draft_tokens);
+
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
@@ -146,7 +146,11 @@ private:
     torch::Tensor target_kv_cache_layer_to_group;
     torch::Tensor draft_kv_cache_layer_to_group;
 
-    AsyncRunner                             spec_logits_verify_async_runner_;
-    std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
+    torch::Tensor draft_tokens_cpu_;
+    torch::Tensor processor_bitmask_cpu_;
+    torch::Tensor merged_bitmask_cpu_;
+    torch::Tensor merged_bitmask_gpu_;
+    torch::Tensor spec_cap_cpu_;
+    torch::Tensor spec_cap_gpu_;
 };
 };  // namespace rtp_llm

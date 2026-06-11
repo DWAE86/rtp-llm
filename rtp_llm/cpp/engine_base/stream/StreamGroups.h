@@ -1,7 +1,6 @@
 #pragma once
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
-#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -51,7 +50,6 @@ public:
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
-            has_spec_logits_processor_ |= stream->findProcessor<SpecLogitsProcessor>() != nullptr;
         }
     }
 
@@ -109,10 +107,6 @@ public:
 
     bool empty() const {
         return context_streams_.empty() && decode_streams_.empty();
-    }
-
-    bool hasSpecLogitsProcessor() const noexcept {
-        return has_spec_logits_processor_;
     }
 
     const std::list<GenerateStreamPtr>& contextStreams() const {
@@ -279,7 +273,6 @@ private:
     bool                         has_multimodal_input_          = false;
     bool                         gen_timeline_                  = false;
     bool                         is_fake_stream_                = false;
-    bool                         has_spec_logits_processor_     = false;
     std::list<std::string>       adapter_names;
 };
 

@@ -608,5 +608,24 @@ class GrammarBeamSearchRejectionTest(TestCase):
         )
 
 
+class GrammarConstraintMutualExclusionTest(TestCase):
+    """Only one grammar constraint field may be set per request."""
+
+    def _assert_rejected(self, **fields):
+        cfg = GenerateConfig(**fields)
+        with self.assertRaises(FtRuntimeException) as ctx:
+            cfg.validate()
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION)
+
+    def test_json_schema_plus_regex_rejected(self):
+        self._assert_rejected(json_schema='{"type": "object"}', regex=r"\d+")
+
+    def test_json_schema_plus_response_format_rejected(self):
+        self._assert_rejected(
+            json_schema='{"type": "object"}',
+            response_format={"type": "json_object"},
+        )
+
+
 if __name__ == "__main__":
     main()

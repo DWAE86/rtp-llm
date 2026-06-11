@@ -51,7 +51,6 @@ cc_library(
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
         "logits_processor/SpecLogitsProcessor.h",
-        "logits_processor/SpecLogitsVerifyRunner.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
@@ -62,7 +61,6 @@ cc_library(
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
-        "logits_processor/SpecLogitsVerifyRunner.cc",
         "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",

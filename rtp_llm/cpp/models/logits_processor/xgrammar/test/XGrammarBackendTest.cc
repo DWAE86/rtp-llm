@@ -1,4 +1,4 @@
-// XGrammarBackendCpp + RtpGrammarMatcher unit tests.
+// XGrammarBackend + RtpGrammarMatcher unit tests.
 //
 // These tests exercise the new native-C++ grammar path end-to-end without
 // any Python/pybind dependency. They prove:
@@ -14,7 +14,7 @@
 // Run: bazel test //rtp_llm/cpp/models/logits_processor/xgrammar/test:xgrammar_backend_cpp_test --config=cuda12_9
 
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/RtpGrammarMatcher.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
 
 #include <gtest/gtest.h>
 
@@ -57,13 +57,13 @@ XGrammarBackendOptions defaultOptions() {
     return opts;
 }
 
-TEST(XGrammarBackendCppTest, ConstructFromTokenizerInfoJson) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
-    EXPECT_FALSE(backend.hasReasoner());
+TEST(XGrammarBackendTest, ConstructFromTokenizerInfoJson) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+    EXPECT_TRUE(backend.isEnabled());
 }
 
-TEST(XGrammarBackendCppTest, CompileBuiltinJSONViaSentinel) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, CompileBuiltinJSONViaSentinel) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
 
     GrammarKeyCpp key{"json", "$$ANY$$"};
     auto          result = backend.compileNow(key);
@@ -72,8 +72,8 @@ TEST(XGrammarBackendCppTest, CompileBuiltinJSONViaSentinel) {
     EXPECT_GT(result.compiled->MemorySizeBytes(), 0u);
 }
 
-TEST(XGrammarBackendCppTest, CompileSimpleJsonSchema) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, CompileSimpleJsonSchema) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     GrammarKeyCpp      key{"json", R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})"};
 
     auto result = backend.compileNow(key);
@@ -82,8 +82,8 @@ TEST(XGrammarBackendCppTest, CompileSimpleJsonSchema) {
     EXPECT_TRUE(result.error_message.empty());
 }
 
-TEST(XGrammarBackendCppTest, CompileMalformedJsonSchemaIsInvalid) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     // Garbage that cannot parse as JSON. Must surface as is_invalid (cacheable
     // failure) rather than a thrown exception — that's the contract the
     // GrammarCompiler async compile path relies on.
@@ -95,8 +95,8 @@ TEST(XGrammarBackendCppTest, CompileMalformedJsonSchemaIsInvalid) {
     EXPECT_FALSE(result.error_message.empty());
 }
 
-TEST(XGrammarBackendCppTest, CacheGetAndSet) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, CacheGetAndSet) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     GrammarKeyCpp      key{"json", R"({"type":"integer"})"};
 
     EXPECT_FALSE(backend.getCached(key));
@@ -110,8 +110,8 @@ TEST(XGrammarBackendCppTest, CacheGetAndSet) {
     EXPECT_EQ(cached.get(), compiled.get()) << "cache must hand back the same shared_ptr";
 }
 
-TEST(XGrammarBackendCppTest, InvalidCacheShortCircuitsRepeat) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, InvalidCacheShortCircuitsRepeat) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     GrammarKeyCpp      key{"json", "{not valid"};
 
     EXPECT_TRUE(backend.getCachedInvalid(key).empty());
@@ -125,8 +125,8 @@ TEST(XGrammarBackendCppTest, InvalidCacheShortCircuitsRepeat) {
     EXPECT_EQ(cached_err, first.error_message);
 }
 
-TEST(XGrammarBackendCppTest, ClearDropsCaches) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, ClearDropsCaches) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     GrammarKeyCpp      key{"json", R"({"type":"integer"})"};
 
     auto compiled = backend.compileNow(key).compiled;
@@ -143,12 +143,12 @@ TEST(XGrammarBackendCppTest, ClearDropsCaches) {
 // many distinct keys (cache is keyed by GrammarKeyCpp::id(); the value pointer
 // is irrelevant to eviction). Requires -fno-access-control (set in BUILD) to
 // read the private capacity constant.
-TEST(XGrammarBackendCppTest, CompiledCacheBoundedByCapacity) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, CompiledCacheBoundedByCapacity) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     auto               compiled = backend.compileNow({"json", R"({"type":"integer"})"}).compiled;
     ASSERT_TRUE(compiled);
 
-    const size_t cap = XGrammarBackendCpp::kMaxCompiledCacheEntries;
+    const size_t cap = XGrammarBackend::kMaxCompiledCacheEntries;
     for (size_t i = 0; i <= cap; ++i) {  // cap + 1 distinct keys
         backend.setCache({"json", "k" + std::to_string(i)}, compiled);
     }
@@ -158,12 +158,12 @@ TEST(XGrammarBackendCppTest, CompiledCacheBoundedByCapacity) {
     EXPECT_TRUE(backend.getCached({"json", "k" + std::to_string(cap)})) << "newest key must survive";
 }
 
-TEST(XGrammarBackendCppTest, CompiledCacheLruKeepsRecentlyUsed) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, CompiledCacheLruKeepsRecentlyUsed) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     auto               compiled = backend.compileNow({"json", R"({"type":"integer"})"}).compiled;
     ASSERT_TRUE(compiled);
 
-    const size_t cap = XGrammarBackendCpp::kMaxCompiledCacheEntries;
+    const size_t cap = XGrammarBackend::kMaxCompiledCacheEntries;
     for (size_t i = 0; i < cap; ++i) {  // fill to capacity: k0..k(cap-1)
         backend.setCache({"json", "k" + std::to_string(i)}, compiled);
     }
@@ -177,15 +177,14 @@ TEST(XGrammarBackendCppTest, CompiledCacheLruKeepsRecentlyUsed) {
     EXPECT_TRUE(backend.getCached({"json", "k_extra"}));
 }
 
-TEST(XGrammarBackendCppTest, CreateMatcherProducesUsableObject) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     auto compiled = backend.compileNow({"json", "$$ANY$$"}).compiled;
     ASSERT_TRUE(compiled);
 
-    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false);
+    auto matcher = backend.createMatcher(compiled);
     ASSERT_TRUE(matcher);
     EXPECT_EQ(matcher->numAcceptedTokens(), 0);
-    EXPECT_FALSE(matcher->isPassthroughForMask());
     EXPECT_FALSE(matcher->isTerminated());
 }
 
@@ -194,9 +193,9 @@ TEST(XGrammarBackendCppTest, CreateMatcherProducesUsableObject) {
 // Mirrors the Python xgrammar_backend.py sanitize behavior. -fno-access-control
 // (set in BUILD) lets us reach the private static directly without exposing it.
 
-TEST(XGrammarBackendCppTest, SanitizeLegacyStructuresFillsMissingSchema) {
+TEST(XGrammarBackendTest, SanitizeLegacyStructuresFillsMissingSchema) {
     const std::string in = R"({"structures":[{"begin":"<a>","end":"</a>"},{"begin":"<b>","schema":{"type":"object"},"end":"</b>"}],"triggers":["<"]})";
-    const std::string out = XGrammarBackendCpp::sanitizeStructuralTag(in);
+    const std::string out = XGrammarBackend::sanitizeStructuralTag(in);
     // First structure had no schema → must now contain "schema":{}.
     EXPECT_NE(out.find(R"("begin":"<a>")"), std::string::npos);
     EXPECT_NE(out.find(R"("schema":{})"), std::string::npos);
@@ -204,15 +203,15 @@ TEST(XGrammarBackendCppTest, SanitizeLegacyStructuresFillsMissingSchema) {
     EXPECT_NE(out.find(R"("type":"object")"), std::string::npos);
 }
 
-TEST(XGrammarBackendCppTest, SanitizeNewFormatJsonSchemaFillsMissingField) {
+TEST(XGrammarBackendTest, SanitizeNewFormatJsonSchemaFillsMissingField) {
     const std::string in = R"({"format":{"type":"json_schema"}})";
-    const std::string out = XGrammarBackendCpp::sanitizeStructuralTag(in);
+    const std::string out = XGrammarBackend::sanitizeStructuralTag(in);
     EXPECT_NE(out.find(R"("json_schema":{})"), std::string::npos);
 }
 
-TEST(XGrammarBackendCppTest, SanitizeNewFormatRecursesIntoSequenceElements) {
+TEST(XGrammarBackendTest, SanitizeNewFormatRecursesIntoSequenceElements) {
     const std::string in = R"({"format":{"type":"sequence","elements":[{"type":"json_schema"},{"type":"qwen_xml_parameter"}]}})";
-    const std::string out = XGrammarBackendCpp::sanitizeStructuralTag(in);
+    const std::string out = XGrammarBackend::sanitizeStructuralTag(in);
     // Both inner nodes should now carry an empty json_schema.
     size_t first = out.find(R"("json_schema":{})");
     ASSERT_NE(first, std::string::npos);
@@ -220,75 +219,32 @@ TEST(XGrammarBackendCppTest, SanitizeNewFormatRecursesIntoSequenceElements) {
     EXPECT_NE(second, std::string::npos);
 }
 
-TEST(XGrammarBackendCppTest, SanitizeLeavesPresentJsonSchemaUntouched) {
+TEST(XGrammarBackendTest, SanitizeLeavesPresentJsonSchemaUntouched) {
     const std::string in = R"({"format":{"type":"json_schema","json_schema":{"type":"integer"}}})";
-    const std::string out = XGrammarBackendCpp::sanitizeStructuralTag(in);
+    const std::string out = XGrammarBackend::sanitizeStructuralTag(in);
     EXPECT_NE(out.find(R"("type":"integer")"), std::string::npos);
     // No spurious empty-dict insertion.
     EXPECT_EQ(out.find(R"("json_schema":{})"), std::string::npos);
 }
 
-TEST(XGrammarBackendCppTest, SanitizeMalformedJsonReturnsInputUnchanged) {
+TEST(XGrammarBackendTest, SanitizeMalformedJsonReturnsInputUnchanged) {
     const std::string in = "this is not json";
-    EXPECT_EQ(XGrammarBackendCpp::sanitizeStructuralTag(in), in);
+    EXPECT_EQ(XGrammarBackend::sanitizeStructuralTag(in), in);
 }
 
-// ---- RtpGrammarMatcher reasoning gate ----------------------------------
+// ---- RtpGrammarMatcher rollback ----------------------------------------
 
-TEST(RtpGrammarMatcherTest, ReasoningPassthroughSuppressesMask) {
-    XGrammarBackendOptions opts = defaultOptions();
-    opts.think_end_id           = 7;  // arbitrary id from our tiny vocab
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), opts);
-
-    auto compiled = backend.compileNow({"json", "$$ANY$$"}).compiled;
+TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+    auto compiled = backend.compileNow({"regex", "a"}).compiled;
     ASSERT_TRUE(compiled);
 
-    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/true);
-    matcher->initReasoning(/*in_think_body=*/true);
-
-    EXPECT_TRUE(matcher->isPassthroughForMask())
-        << "reasoning matcher must start in passthrough phase";
-
-    // Accepting non-think_end tokens should NOT advance the parser nor exit
-    // passthrough. Use ASCII 'a' (id 97) — definitely not the think_end id.
-    EXPECT_TRUE(matcher->acceptToken(97));
-    EXPECT_TRUE(matcher->isPassthroughForMask());
+    auto matcher = backend.createMatcher(compiled);
+    constexpr int kA = 'a';
+    EXPECT_TRUE(matcher->acceptToken(kA));
     EXPECT_EQ(matcher->numAcceptedTokens(), 1);
-
-    // Now feed the think_end_id. The state machine flips out of passthrough.
-    EXPECT_TRUE(matcher->acceptToken(7));
-    EXPECT_FALSE(matcher->isPassthroughForMask())
-        << "after think_end_id the bitmask must apply";
-}
-
-TEST(RtpGrammarMatcherTest, NoReasoningNeverEntersPassthrough) {
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), defaultOptions());  // no think_end_id
-
-    auto compiled = backend.compileNow({"json", "$$ANY$$"}).compiled;
-    ASSERT_TRUE(compiled);
-
-    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false);
-    EXPECT_FALSE(matcher->isPassthroughForMask());
-    matcher->initReasoning(true);  // should be a no-op when require_reasoning is false
-    EXPECT_FALSE(matcher->isPassthroughForMask());
-}
-
-TEST(RtpGrammarMatcherTest, RollbackAcrossThinkEndReentersPassthrough) {
-    XGrammarBackendOptions opts = defaultOptions();
-    opts.think_end_id           = 7;
-    XGrammarBackendCpp backend(makeTokenizerInfoJson(), opts);
-
-    auto compiled = backend.compileNow({"json", "$$ANY$$"}).compiled;
-    ASSERT_TRUE(compiled);
-    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/true);
-    matcher->initReasoning(/*in_think_body=*/true);
-
-    EXPECT_TRUE(matcher->acceptToken(7));  // think_end → exit passthrough
-    EXPECT_FALSE(matcher->isPassthroughForMask());
-
-    // Rolling back the think_end token should re-enter passthrough.
     matcher->rollback(1);
-    EXPECT_TRUE(matcher->isPassthroughForMask());
+    EXPECT_EQ(matcher->numAcceptedTokens(), 0);
 }
 
 }  // namespace

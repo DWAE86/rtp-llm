@@ -6,7 +6,6 @@ from typing import Any, AsyncGenerator, List, Optional
 
 from fastapi import Request
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
@@ -168,58 +167,33 @@ class OpenaiEndpoint(object):
 
     @staticmethod
     def _apply_response_format(rf: "ResponseFormat", config: GenerateConfig) -> None:
-        """Extract grammar constraints from a typed ResponseFormat into GenerateConfig fields.
+        """Project a validated ResponseFormat onto GenerateConfig grammar fields.
 
-        ResponseFormat.type and required payload are validated by the Pydantic model;
-        unknown types or missing payload reach this function only when the model is
-        constructed directly in Python. Reject them with INVALID_PARAMS rather than
-        silently falling back to unconstrained generation.
+        Shape and required-payload checks live in ResponseFormat._check_payload
+        (pydantic model_validator), which always runs before this projection on
+        every request reaching the OpenAI endpoint; unknown `type` is rejected
+        by the pydantic Literal at the same layer. We translate only here and
+        do not re-validate.
         """
         config.json_schema = None
         config.regex = None
         config.ebnf = None
         config.structural_tag = None
-        if rf.type == "text":
-            return
         if rf.type == "json_schema":
-            if rf.json_schema is None or rf.json_schema.schema is None:
-                raise FtRuntimeException(
-                    ExceptionType.INVALID_PARAMS,
-                    "response_format.type='json_schema' requires a non-null json_schema.schema",
-                )
             config.json_schema = json.dumps(
                 rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
             )
         elif rf.type == "json_object":
             config.json_schema = json.dumps({"type": "object"})
         elif rf.type == "regex":
-            if not rf.pattern:
-                raise FtRuntimeException(
-                    ExceptionType.INVALID_PARAMS,
-                    "response_format.type='regex' requires a non-empty pattern",
-                )
             config.regex = rf.pattern
         elif rf.type == "ebnf":
-            if not rf.grammar:
-                raise FtRuntimeException(
-                    ExceptionType.INVALID_PARAMS,
-                    "response_format.type='ebnf' requires a non-empty grammar",
-                )
             config.ebnf = rf.grammar
         elif rf.type == "structural_tag":
-            if not rf.structural_tag:
-                raise FtRuntimeException(
-                    ExceptionType.INVALID_PARAMS,
-                    "response_format.type='structural_tag' requires a non-empty structural_tag",
-                )
             config.structural_tag = json.dumps(
                 rf.structural_tag, ensure_ascii=False, separators=(",", ":")
             )
-        else:
-            raise FtRuntimeException(
-                ExceptionType.INVALID_PARAMS,
-                f"unknown response_format.type: {rf.type!r}",
-            )
+        # rf.type == "text" falls through with all four fields cleared above.
 
     def _extract_generation_config(
         self, request: ChatCompletionRequest

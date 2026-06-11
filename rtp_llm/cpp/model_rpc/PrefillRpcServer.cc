@@ -228,15 +228,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    if (auto admission = engine_->validateStructuredOutputAdmission(prefill_context.generate_input); !admission.ok()) {
-        prefill_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(admission.message()));
-        prefill_context.error_status =
-            serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
-        RTP_LLM_LOG_INFO("[structured_output_admission] rejected prefill request [%ld]: %s",
-                         prefill_context.request_id,
-                         admission.message().data());
-        return;
-    }
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);

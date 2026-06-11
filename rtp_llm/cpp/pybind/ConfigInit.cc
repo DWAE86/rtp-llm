@@ -1147,44 +1147,56 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("grammar_backend", &GrammarConfig::grammar_backend)
         .def_readwrite("constrained_json_disable_any_whitespace",
                        &GrammarConfig::constrained_json_disable_any_whitespace)
-        .def_readwrite("reasoning_parser", &GrammarConfig::reasoning_parser)
         .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
-        .def_readwrite("think_end_id", &GrammarConfig::think_end_id)
-        .def_readwrite("think_start_id", &GrammarConfig::think_start_id)
-        .def("to_string", &GrammarConfig::to_string)
         .def(py::pickle(
             [](const GrammarConfig& self) {
                 return py::make_tuple(self.grammar_backend,
                                       self.constrained_json_disable_any_whitespace,
-                                      self.reasoning_parser,
                                       self.compile_timeout_ms,
                                       self.num_workers,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens,
-                                      self.think_end_id,
-                                      self.think_start_id);
+                                      self.override_stop_tokens);
             },
             [](py::tuple t) {
-                if (t.size() != 8 && t.size() != 9)
+                if (t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
                     c.grammar_backend                         = t[0].cast<std::string>();
                     c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
-                    c.reasoning_parser                        = t[2].cast<std::string>();
-                    c.compile_timeout_ms                      = t[3].cast<int64_t>();
-                    c.num_workers                             = t[4].cast<int>();
-                    c.tokenizer_info_json                     = t[5].cast<std::string>();
-                    c.override_stop_tokens                    = t[6].cast<std::vector<int32_t>>();
-                    c.think_end_id                            = t[7].cast<int64_t>();
-                    if (t.size() >= 9) {
-                        c.think_start_id                      = t[8].cast<int64_t>();
-                    }
+                    c.compile_timeout_ms                      = t[2].cast<int64_t>();
+                    c.num_workers                             = t[3].cast<int>();
+                    c.tokenizer_info_json                     = t[4].cast<std::string>();
+                    c.override_stop_tokens                    = t[5].cast<std::vector<int32_t>>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }));
+
+    // Register ReasoningConfig
+    py::class_<ReasoningConfig>(m, "ReasoningConfig")
+        .def(py::init<>())
+        .def_readwrite("reasoning_parser", &ReasoningConfig::reasoning_parser)
+        .def_readwrite("think_start_id", &ReasoningConfig::think_start_id)
+        .def_readwrite("think_end_id", &ReasoningConfig::think_end_id)
+        .def(py::pickle(
+            [](const ReasoningConfig& self) {
+                return py::make_tuple(self.reasoning_parser, self.think_start_id, self.think_end_id);
+            },
+            [](py::tuple t) {
+                if (t.size() != 3)
+                    throw std::runtime_error("Invalid state!");
+                ReasoningConfig c;
+                try {
+                    c.reasoning_parser = t[0].cast<std::string>();
+                    c.think_start_id   = t[1].cast<int64_t>();
+                    c.think_end_id     = t[2].cast<int64_t>();
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("ReasoningConfig unpickle error: ") + e.what());
                 }
                 return c;
             }));

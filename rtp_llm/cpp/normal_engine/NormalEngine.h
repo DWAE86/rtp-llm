@@ -47,13 +47,8 @@ public:
     bool updateEplbConfig(const EPLBConfig& config) override;
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
-    absl::Status validateStructuredOutputAdmission(const std::shared_ptr<GenerateInput>& input) const override;
-
 private:
-    void                            initScheduler();
-    std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
-    std::shared_ptr<GenerateStream> createAdmissionRejectedStream(const std::shared_ptr<GenerateInput>& input,
-                                                                  const absl::Status&                     status);
+    void initScheduler();
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);

@@ -31,6 +31,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
     PDSepConfig,
     ProfilingDebugLoggingConfig,
+    ReasoningConfig,
     RoleType,
     RuntimeConfig,
     SpeculativeExecutionConfig,
@@ -71,6 +72,7 @@ class EngineConfig:
     grpc_config: GrpcConfig
     load_config: LoadConfig
     grammar_config: GrammarConfig = field(default_factory=GrammarConfig)
+    reasoning_config: ReasoningConfig = field(default_factory=ReasoningConfig)
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -181,10 +183,9 @@ class EngineConfig:
         else:
             lines.append(str(self.load_config))
         lines.append("\n[GrammarConfig]")
-        if hasattr(self.grammar_config, "to_string"):
-            lines.append(self.grammar_config.to_string())
-        else:
-            lines.append(str(self.grammar_config))
+        lines.append(str(self.grammar_config))
+        lines.append("\n[ReasoningConfig]")
+        lines.append(str(self.reasoning_config))
 
         lines.append("\n" + "=" * 80)
         return "\n".join(lines)
@@ -235,6 +236,7 @@ class EngineConfig:
         grpc_config = py_env_configs.grpc_config
         load_config = py_env_configs.load_config
         grammar_config = py_env_configs.grammar_config
+        reasoning_config = py_env_configs.reasoning_config
 
         # role_config.role_type property automatically converts string to RoleType enum
         pd_sep_config.role_type = py_env_configs.role_config.role_type
@@ -269,6 +271,7 @@ class EngineConfig:
             grpc_config=grpc_config,
             load_config=load_config,
             grammar_config=grammar_config,
+            reasoning_config=reasoning_config,
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit

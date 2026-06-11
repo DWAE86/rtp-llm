@@ -69,26 +69,24 @@ struct XGrammarBackendOptions {
     int                                           max_compiler_threads  = 8;
     bool                                          enable_compiler_cache = true;
     int64_t                                       compiler_cache_bytes  = -1;  // unlimited
-    std::optional<std::vector<int32_t>>           override_stop_tokens;
-    std::optional<int32_t>                        think_end_id;    // set ⇒ reasoner mode
-    std::optional<int32_t>                        think_start_id;  // optional: prompt-state hint
+    std::optional<std::vector<int32_t>> override_stop_tokens;
 };
 
 // Native-C++ replacement for the trio {base,xgrammar,reasoner}_grammar_backend.py.
 // Owns the xgrammar compiler + in-memory LRU cache. Thread-safe; no GIL.
 // Lifetime is owned by GrammarCompiler (process singleton); construct directly
 // in unit tests.
-class XGrammarBackendCpp {
+class XGrammarBackend {
 public:
     // tokenizer_info_json must be SerializeJSON() of an xgrammar::TokenizerInfo
     // built on the Python side from the model's HF tokenizer. Throws on
     // deserialize failure — caller treats as unrecoverable.
-    XGrammarBackendCpp(const std::string&            tokenizer_info_json,
+    XGrammarBackend(const std::string&            tokenizer_info_json,
                        const XGrammarBackendOptions& options);
-    ~XGrammarBackendCpp();
+    ~XGrammarBackend();
 
-    XGrammarBackendCpp(const XGrammarBackendCpp&)            = delete;
-    XGrammarBackendCpp& operator=(const XGrammarBackendCpp&) = delete;
+    XGrammarBackend(const XGrammarBackend&)            = delete;
+    XGrammarBackend& operator=(const XGrammarBackend&) = delete;
 
     // structural_tag preprocessing: parse, fill missing `json_schema:{}` /
     // `schema:{}` defaults, re-serialize. Returns input unchanged on parse failure.
@@ -109,13 +107,11 @@ public:
     // The shared_ptr<CompiledGrammar> inside keeps the compile alive past
     // any cache eviction.
     std::unique_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                     bool                                       require_reasoning);
+                                                     bool                                       terminate_without_stop_token = false,
+                                                     bool                                       require_reasoning            = false,
+                                                     std::vector<int>                           think_end_token_ids          = {});
 
     void clear();
-
-    bool                   hasReasoner() const noexcept { return options_.think_end_id.has_value(); }
-    std::optional<int32_t> thinkEndId() const noexcept { return options_.think_end_id; }
-    std::optional<int32_t> thinkStartId() const noexcept { return options_.think_start_id; }
 
     // Backend health flag surfaced to the gate factory: false means grammar
     // requests must be rejected at admission instead of failing per stream.

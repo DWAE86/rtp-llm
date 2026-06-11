@@ -62,8 +62,9 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
     while (stream->isActive() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
-            RTP_LLM_LOG_INFO("stream nextOutput failed");
-            break;
+            const std::string err_msg = "stream nextOutput failed: " + result.status().ToString();
+            RTP_LLM_LOG_WARNING("%s", err_msg.c_str());
+            throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, err_msg);
         }
         outputs = result.value();
         RTP_LLM_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
@@ -136,8 +137,9 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
     while (stream->isActive()) {
         const auto output_status = stream->nextOutput();
         if (!output_status.ok()) {
-            RTP_LLM_LOG_INFO("stream nextOutput failed");
-            break;
+            const std::string err_msg = "stream nextOutput failed: " + output_status.status().ToString();
+            RTP_LLM_LOG_WARNING("%s", err_msg.c_str());
+            throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, err_msg);
         }
         outputs = output_status.value();
         RTP_LLM_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
