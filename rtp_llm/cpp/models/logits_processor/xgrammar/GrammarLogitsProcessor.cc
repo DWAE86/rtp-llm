@@ -9,6 +9,7 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarCompiler.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/ReasoningGate.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -18,7 +19,10 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#if USING_CUDA || USING_ROCM
+// xgrammar_kernels.cu is a CUDA-only translation unit (cuda_runtime_api.h, nvcc).
+// ROCm builds intentionally fall back to the bool-mask masked_fill_ path below;
+// keep this guard CUDA-only to match BUILD's `select({"//:using_cuda": [":xgrammar_kernels"]})`.
+#if USING_CUDA
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/xgrammar_kernels.h"
 #endif
 
@@ -170,7 +174,7 @@ BaseLogitsProcessorPtr GrammarLogitsProcessor::tryCreatePending(const std::share
     prep->key_    = extractGrammarKey(config);
     prep->future_ = compiler.submit(prep->key_);
     prep->deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(compiler.compileTimeoutMs());
-    RTP_LLM_LOG_DEBUG("grammar processor created (pending): key=%s", prep->key_.brief().c_str());
+    RTP_LLM_LOG_INFO("grammar processor created (pending): key=%s", prep->key_.brief().c_str());
     return prep;
 }
 
@@ -183,17 +187,19 @@ bool GrammarLogitsProcessor::needsPreparation() const {
 
 void GrammarLogitsProcessor::installMatcher(GenerateStream& stream, const GrammarReadyPayload& payload) {
     const bool terminate_without_stop_token = key_.key_type == "json";
-    matcher_ = GrammarCompiler::instance().createMatcher(payload.compiled,
-                                                         terminate_without_stop_token,
-                                                         require_reasoning_,
-                                                         think_end_token_ids_);
+    matcher_ = GrammarCompiler::instance().createMatcher(payload.compiled, terminate_without_stop_token);
     stream_  = stream.sharedThis();
 
-    // Reasoning gate: enter passthrough so prefill-replay and the first decode
-    // step see the matcher's KMP scanner instead of the active parser. Must
-    // run before any acceptToken (the matcher's own contract).
+    // Reasoning gate: built around the matcher only when the request started
+    // inside a think body. While the gate is in passthrough, prefill-replay and
+    // the first decode step skip matcher advancement and publish an allow-all
+    // mask; the gate's KMP scanner advances until think_end_token_ids_ is
+    // matched, then transitions to active and the matcher takes over.
     if (matcher_ && require_reasoning_) {
-        matcher_->initReasoning(/*in_think_body=*/true);
+        reasoning_gate_ = std::make_unique<ReasoningGate>(
+            think_end_token_ids_,
+            /*in_think_body=*/true,
+            static_cast<size_t>(matcher_->maxRollbackTokens()));
     }
 
     // Snapshot any tokens already present on the stream BEFORE replaying them into
@@ -214,7 +220,7 @@ void GrammarLogitsProcessor::installMatcher(GenerateStream& stream, const Gramma
     if (!prefill_tokens.empty()) {
         (void)advanceMatcher(prefill_tokens, MatcherAdvance::ReplayOnly, /*caller_holds_stream_lock=*/true);
     }
-    accepted_token_len_ = matcher_ ? matcher_->numAcceptedTokens() : 0;
+    accepted_token_len_ = total_advanced_;
     eos_token_id_       = stream.specialTokens().eos_token_id;
 }
 
@@ -229,7 +235,7 @@ void GrammarLogitsProcessor::logGrammarLifecycle(const char* phase,
     const int64_t num_accepted = matcher_ ? matcher_->numAcceptedTokens() : -1;
     const int     terminated   = matcher_ && matcher_->isTerminated() ? 1 : 0;
     const int     finished     = matcher_ && matcher_->finished() ? 1 : 0;
-    RTP_LLM_LOG_DEBUG("[grammar_lifecycle] stream=%ld phase=%s source=%s num_accepted=%ld "
+    RTP_LLM_LOG_INFO("[grammar_lifecycle] stream=%ld phase=%s source=%s num_accepted=%ld "
                       "terminated=%d finished=%d",
                       stream_id,
                       phase,
@@ -237,6 +243,10 @@ void GrammarLogitsProcessor::logGrammarLifecycle(const char* phase,
                       static_cast<long>(num_accepted),
                       terminated,
                       finished);
+}
+
+bool GrammarLogitsProcessor::inReasoningPassthrough() const noexcept {
+    return reasoning_gate_ && reasoning_gate_->inPassthrough();
 }
 
 bool GrammarLogitsProcessor::advanceMatcher(const std::vector<int32_t>& tokens,
@@ -257,11 +267,18 @@ bool GrammarLogitsProcessor::advanceMatcher(const std::vector<int32_t>& tokens,
         if (matcher_->isTerminated() || matcher_->finished()) {
             break;
         }
+        // Reasoning passthrough: parser frozen until the end-think sequence is
+        // observed. Step the gate and skip matcher advancement.
+        if (inReasoningPassthrough()) {
+            reasoning_gate_->observe(tok, /*forwarded_to_matcher=*/false);
+            ++total_advanced_;
+            continue;
+        }
         if (!matcher_->acceptToken(tok)) {
             reported_error_.store(true, std::memory_order_relaxed);
             // Always markFinished so subsequent getDeviceMaskState routes through
             // FINISHED early-return rather than fillBitmask on a parser left in
-            // an indeterminate post-reject state. Aligns with dsv4 baseline.
+            // an indeterminate post-reject state.
             matcher_->markFinished();
             RTP_LLM_LOG_WARNING("[grammar] advanceMatcher rejected token %d source=%s num_accepted=%ld",
                                 tok,
@@ -275,6 +292,10 @@ bool GrammarLogitsProcessor::advanceMatcher(const std::vector<int32_t>& tokens,
             }
             return false;
         }
+        if (reasoning_gate_) {
+            reasoning_gate_->observe(tok, /*forwarded_to_matcher=*/true);
+        }
+        ++total_advanced_;
     }
 
     return true;
@@ -338,7 +359,7 @@ PrepareState GrammarLogitsProcessor::prepare(GenerateStream& stream) {
                                           std::string("grammar matcher install failed: ") + e.what());
             return PrepareState::Failed;
         }
-        RTP_LLM_LOG_DEBUG("stream [%ld] grammar ready: key=%s", stream.streamId(), key_.brief().c_str());
+        RTP_LLM_LOG_INFO("stream [%ld] grammar ready: key=%s", stream.streamId(), key_.brief().c_str());
         return PrepareState::Ready;
     }();
 
@@ -367,7 +388,7 @@ int64_t GrammarLogitsProcessor::acceptedTokenLen() const {
 }
 
 void GrammarLogitsProcessor::syncAcceptedTokenLenLocked() {
-    accepted_token_len_ = matcher_ ? matcher_->numAcceptedTokens() : 0;
+    accepted_token_len_ = total_advanced_;
 }
 
 void GrammarLogitsProcessor::rebuildDeviceMaskStateLocked() {
@@ -378,9 +399,12 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::getDeviceMaskSta
     std::unique_lock<std::mutex> lock(state_mutex_);
     last_mask_device_ = device;
     if (pending_async_token_len_ > accepted_token_len_) {
-        RTP_LLM_LOG_DEBUG("[grammar] getDeviceMaskState waiting for token sync: pending=%ld accepted=%ld",
+        RTP_LLM_LOG_INFO("[grammar] getDeviceMaskState waiting for token sync: pending=%ld accepted=%ld",
                           pending_async_token_len_, accepted_token_len_);
-        static constexpr auto kMaskWaitTimeout = std::chrono::milliseconds(5000);
+        // 通过 GrammarCompiler 透传 GrammarConfig::mask_wait_timeout_ms。
+        // 默认 5000ms，可由 --grammar_mask_wait_timeout_ms / 环境变量调整。
+        const auto kMaskWaitTimeout =
+            std::chrono::milliseconds(GrammarCompiler::instance().maskWaitTimeoutMs());
         bool resolved = state_cv_.wait_for(lock, kMaskWaitTimeout, [this]() {
             return pending_async_token_len_ <= accepted_token_len_ || reported_error_.load() || !matcher_
                    || matcher_->finished();
@@ -435,9 +459,9 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskS
     }
     // Reasoning passthrough: still inside the think body, parser is frozen.
     // Emit an allow-all (no-op) mask; updateStatus / spec verify keep stepping
-    // the matcher's KMP scanner so the transition into active grammar lands
+    // the gate's KMP scanner so the transition into active grammar lands
     // automatically once think_end_token_ids matches.
-    if (matcher_->isPassthroughForMask()) {
+    if (inReasoningPassthrough()) {
         state.mode = DeviceMaskMode::PASSTHROUGH;
         return state;
     }
@@ -459,13 +483,30 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskS
     int64_t       dl_shape[2];
     DLTensor      dl      = makeSingleRowBitmaskView(bitmask.data_ptr<int32_t>(), words, dl_shape);
     if (!matcher_->fillBitmask(&dl, 0)) {
-        state.mode = DeviceMaskMode::NOOP;
+        // fillBitmask returning false signals an indeterminate matcher state.
+        // Falling back to NOOP would silently let the sampler emit any token —
+        // user gets schema-illegal output with no error trail. Mirror the
+        // token-sync timeout branch: mark finished, surface a stream error,
+        // and route through FINISHED so subsequent process() short-circuits.
+        reported_error_.store(true, std::memory_order_relaxed);
+        matcher_->markFinished();
+        reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
+                               "grammar matcher fillBitmask failed; matcher state corrupted",
+                               /*stream_lock_held=*/false);
+        state.mode = DeviceMaskMode::FINISHED;
         return state;
     }
 
     state.grammar_vocab_size = grammar_vocab_size;
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA
     if (device.is_cuda()) {
+        // NOTE: Per-token allocation of `ready_event` and the H2D copy out of a pageable
+        // CPU bitmask were flagged in review. Left as-is: bitmask is only a few KB
+        // (grammar_vocab/32 int32), CUDA Graph capture replaces this path with a stub,
+        // and the eager-mode cost is not on the critical path. A future grammar
+        // performance pass should (a) keep one reusable cuda::Event member and re-record
+        // it instead of make_shared<Event>() each step, and (b) back reusable_bitmask_cpu_
+        // with pinned memory so non_blocking copies are actually non-blocking.
         if (!reusable_bitmask_gpu_.defined() || reusable_bitmask_gpu_.size(1) < words
             || reusable_bitmask_gpu_.device() != device) {
             reusable_bitmask_gpu_ = torch::empty({1, words}, bitmask.options().device(device));
@@ -504,7 +545,7 @@ void GrammarLogitsProcessor::publishMaskToDevice(DeviceMaskState&   state,
     }
 
     state.vocab_mask = vocab_mask.to(device, /*non_blocking=*/true);
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA
     state.ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     state.ready_event->record(cuda_graph::graphGetCurrentStream());
 #endif
@@ -524,7 +565,7 @@ void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, c
             break;
     }
 
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA
     if (state.packed_bitmask.defined() && logits.is_cuda()) {
         if (state.ready_event) {
             state.ready_event->block(cuda_graph::graphGetCurrentStream());
@@ -534,6 +575,17 @@ void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, c
                                           state.packed_bitmask,
                                           static_cast<int64_t>(state.grammar_vocab_size),
                                           cuda_graph::graphGetCurrentStream().stream());
+        // Bitmask only covers [0, grammar_vocab_size). The CPU path explicitly
+        // fills [grammar_vocab_size, model_vocab) with -inf — mirror that on
+        // GPU so the tail (e.g. lora-extended vocab beyond what the grammar
+        // tokenizer knows) cannot be sampled. Skipping this would let GPU
+        // diverge from CPU when model_vocab > grammar_vocab.
+        const int64_t model_vocab = logits.size(0);
+        const int64_t grammar_vocab = static_cast<int64_t>(state.grammar_vocab_size);
+        if (grammar_vocab > 0 && model_vocab > grammar_vocab) {
+            logits.narrow(0, grammar_vocab, model_vocab - grammar_vocab)
+                .fill_(BaseLogitsProcessor::neg_inf);
+        }
         return;
     }
 #endif
@@ -541,7 +593,7 @@ void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, c
     if (!state.vocab_mask.defined()) {
         return;
     }
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA
     if (state.ready_event && logits.is_cuda()) {
         state.ready_event->block(cuda_graph::graphGetCurrentStream());
     }
@@ -564,8 +616,10 @@ void GrammarLogitsProcessor::forceToken(const torch::Tensor& logits, int64_t tok
     if (token_id < 0 || token_id >= logits.size(0)) {
         return;
     }
+    // 其余位置已是 -inf，被强制位置只要任意 finite 值即可让 softmax 归一为 1.0；
+    // 用 0.0f 而非魔法常数 1，避免后续被读成"该 token 的真实 logit"。
     logits.fill_(BaseLogitsProcessor::neg_inf);
-    logits[token_id] = 1;
+    logits[token_id] = 0.0f;
 }
 
 void GrammarLogitsProcessor::maskToken(const torch::Tensor& logits, int64_t token_id) {
@@ -628,7 +682,7 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
         return static_cast<int64_t>(-1);
     }();
     logGrammarLifecycle("commit", "notifyCommit", trace_stream_id);
-    RTP_LLM_LOG_DEBUG("[grammar_commit_trace] commit start: stream=%ld num_accepted=%ld "
+    RTP_LLM_LOG_INFO("[grammar_commit_trace] commit start: stream=%ld num_accepted=%ld "
                       "num_new_tokens=%d batch=%d",
                       trace_stream_id,
                       matcher_->numAcceptedTokens(),
@@ -637,7 +691,7 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        // dsv4-style commit walk: terminated + EOS -> markFinished and stop;
+        // Commit walk: terminated + EOS -> markFinished and stop;
         // any other token after terminated -> error. Pre-terminal accept failures
         // are handled by advanceMatcher's reportError path.
         bool stop_after_eos = false;
@@ -686,7 +740,7 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
     }
 
     if (auto stream = stream_.lock()) {
-        RTP_LLM_LOG_DEBUG("[sp_accept_trace] stream_id=%ld grammar=%s propose_step=%zu accept_len=%d",
+        RTP_LLM_LOG_INFO("[sp_accept_trace] stream_id=%ld grammar=%s propose_step=%zu accept_len=%d",
                           stream->streamId(),
                           grammarKindTag(stream).c_str(),
                           stream->getProposeStep(),
@@ -733,9 +787,13 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         return 0;
     }
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (isGrammarMatcherComplete()) {
-        return 0;
-    }
+    // Do not short-circuit on terminated/finished here: the caller pre-fills
+    // proc_mask with kBitmaskAllowAll, and returning 0 immediately would
+    // leave row[0] at allow-all. The merged target mask would then be
+    // unconstrained, target sampling could pick any token, and commit-side
+    // would trigger report_after_terminal on a non-EOS post-terminal token.
+    // Let the offset==0 iteration of the loop below run fill_row first so
+    // that terminated emits an EOS-only row before we cap.
 
     const int  P               = request.propose_step;
     const auto W               = request.bitmask_size_int32;
@@ -766,11 +824,20 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
     auto fill_row = [&](int32_t* row) -> VerifyRowState {
         std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
         if (matcher_->finished()) {
+            // Force EOS-only so the merged target mask cannot be unconstrained
+            // for this row; otherwise an early cap=0 here, ANDed with a still
+            // allow-all proc_mask row, lets target sampling pick any token.
+            forceTokenInBitmask(row, W, eos_token_id_);
             return VerifyRowState::Finished;
         }
         if (matcher_->isTerminated()) {
             forceTokenInBitmask(row, W, eos_token_id_);
             return VerifyRowState::Terminated;
+        }
+        // Reasoning passthrough: parser frozen. Leave row at allow-all so the
+        // sampler is unconstrained until the gate transitions to active.
+        if (inReasoningPassthrough()) {
+            return VerifyRowState::Active;
         }
 
         const int32_t grammar_vocab_size = matcher_->vocabSize();
@@ -779,10 +846,30 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         int64_t  dl_shape[2];
         DLTensor dl = makeSingleRowBitmaskView(row, static_cast<int32_t>(grammar_words), dl_shape);
         if (!matcher_->fillBitmask(&dl, 0)) {
-            return VerifyRowState::Active;
+            // fillBitmask failed mid-verify: matcher state is corrupted. Same
+            // policy as getDeviceMaskState — finish + report instead of leaving
+            // the row at allow-all (which would let target sampling pick any
+            // token and resurface as a non-EOS-after-terminal error later).
+            reported_error_.store(true, std::memory_order_relaxed);
+            matcher_->markFinished();
+            forceTokenInBitmask(row, W, eos_token_id_);
+            reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
+                                   "grammar matcher fillBitmask failed during MTP verify; matcher state corrupted",
+                                   /*stream_lock_held=*/false);
+            return VerifyRowState::Finished;
         }
         clearBitmaskTokenRange(row, W, grammar_vocab_size, static_cast<int64_t>(request.vocab_size));
         return VerifyRowState::Active;
+    };
+
+    int gate_steps = 0;  // total gate observations made; rolled back symmetrically.
+    auto rollback_provisional = [&]() {
+        if (accepted_prefix > 0) {
+            matcher_->rollback(accepted_prefix);
+        }
+        if (reasoning_gate_ && gate_steps > 0) {
+            (void)reasoning_gate_->rollback(gate_steps);
+        }
     };
 
     try {
@@ -798,29 +885,36 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
             }
 
             const int32_t draft_token = request.draft_tokens[offset];
-            if (draft_token < 0 || static_cast<size_t>(draft_token) >= request.vocab_size
-                || !bitmaskAllowsToken(row, draft_token)) {
-                cap = offset;
-                break;
+            const bool    in_passthrough = inReasoningPassthrough();
+            if (!in_passthrough) {
+                if (draft_token < 0 || static_cast<size_t>(draft_token) >= request.vocab_size
+                    || !bitmaskAllowsToken(row, draft_token)) {
+                    cap = offset;
+                    break;
+                }
+                if (!matcher_->acceptToken(draft_token)) {
+                    cap = offset;
+                    break;
+                }
+                ++accepted_prefix;
+                if (reasoning_gate_) {
+                    reasoning_gate_->observe(draft_token, /*forwarded_to_matcher=*/true);
+                    ++gate_steps;
+                }
+            } else {
+                // Passthrough: any token is grammar-legal; only the gate advances.
+                reasoning_gate_->observe(draft_token, /*forwarded_to_matcher=*/false);
+                ++gate_steps;
             }
-            if (!matcher_->acceptToken(draft_token)) {
-                cap = offset;
-                break;
-            }
-            ++accepted_prefix;
             // Do NOT early-break on terminated / finished / only-stop-legal here:
             // doing so would leave row[offset+1] holding the prior all-allow contents.
-            // Aligns with dsv4 baseline — let the next iteration's fill_row observe
-            // the matcher's new state and emit the correct EOS-only / finished row.
+            // Let the next iteration's fill_row observe the matcher's new state and
+            // emit the correct EOS-only / finished row.
         }
 
-        if (accepted_prefix > 0) {
-            matcher_->rollback(accepted_prefix);
-        }
+        rollback_provisional();
     } catch (...) {
-        if (accepted_prefix > 0) {
-            try { matcher_->rollback(accepted_prefix); } catch (...) { matcher_->markFinished(); }
-        }
+        try { rollback_provisional(); } catch (...) { matcher_->markFinished(); }
         throw;
     }
     return cap;

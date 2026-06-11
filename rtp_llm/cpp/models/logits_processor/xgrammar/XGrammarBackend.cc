@@ -273,7 +273,7 @@ CompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
                                 std::chrono::steady_clock::now() - t_start)
                                 .count();
     if (result.compiled) {
-        RTP_LLM_LOG_DEBUG("XGrammarBackend compile OK: type=%s, len=%zu, elapsed_ms=%lld, bytes=%zu",
+        RTP_LLM_LOG_INFO("XGrammarBackend compile OK: type=%s, len=%zu, elapsed_ms=%lld, bytes=%zu",
                           key.key_type.c_str(),
                           key.key_string.size(),
                           static_cast<long long>(elapsed_ms),
@@ -292,16 +292,12 @@ CompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
 
 std::unique_ptr<RtpGrammarMatcher>
 XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                    bool                                       terminate_without_stop_token,
-                                    bool                                       require_reasoning,
-                                    std::vector<int>                           think_end_token_ids) {
+                               bool                                       terminate_without_stop_token) {
     assert(compiled && "createMatcher requires a non-null CompiledGrammar");
     return std::make_unique<RtpGrammarMatcher>(std::move(compiled),
                                                options_.override_stop_tokens,
                                                terminate_without_stop_token,
-                                               /*max_rollback_tokens=*/200,
-                                               require_reasoning,
-                                               std::move(think_end_token_ids));
+                                               /*max_rollback_tokens=*/200);
 }
 
 void XGrammarBackend::clear() {

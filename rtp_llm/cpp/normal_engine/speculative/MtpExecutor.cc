@@ -1080,11 +1080,17 @@ void MtpExecutor::ensureSpecLogitsBuffersFit(size_t total_streams,
     if (!draft_tokens_cpu_.defined() || draft_tokens_cpu_.numel() < B * P) {
         draft_tokens_cpu_ = torch::empty({B, P}, pinned_i32);
     }
+    // Pinned: merged_bitmask_cpu_ is the source of mask_gpu.copy_(non_blocking=true)
+    // every spec step. Pageable source forces PyTorch to internally pin+copy
+    // synchronously, which silently strips the non_blocking property.
+    // processor_bitmask_cpu_ is local-scratch (only AND'd into merged_bitmask_cpu_,
+    // never directly H2D'd) so pinning it isn't strictly required, but we pin
+    // it too for symmetry — the buffer is small and only allocated once.
     if (!processor_bitmask_cpu_.defined() || processor_bitmask_cpu_.numel() < (P + 1) * W) {
-        processor_bitmask_cpu_ = torch::empty({P + 1, W}, cpu_i32);
+        processor_bitmask_cpu_ = torch::empty({P + 1, W}, pinned_i32);
     }
     if (!merged_bitmask_cpu_.defined() || merged_bitmask_cpu_.numel() < rows * W) {
-        merged_bitmask_cpu_ = torch::empty({rows, W}, cpu_i32);
+        merged_bitmask_cpu_ = torch::empty({rows, W}, pinned_i32);
     }
     if (!spec_cap_cpu_.defined() || spec_cap_cpu_.numel() < B) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
@@ -1167,7 +1173,11 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
     RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid MTP spec logits verify task");
 
     ensureSpecLogitsBuffersFit(B, P, V, W);
-    materializeDraftTokensToCpu(B, P, draft_tokens);
+    // materializeDraftTokensToCpu does an O(B*P) device->host copy that's only
+    // useful if at least one processor is eligible. Defer it to the first
+    // eligible-hit; if every active processor is filtered out, we skip the
+    // copy entirely and short-circuit returning {} below.
+    bool draft_tokens_materialized = false;
 
     auto merged = merged_bitmask_cpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(W));
     fillAllAllowBitmask(merged);
@@ -1180,6 +1190,10 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
             continue;
         }
         applied_processor = true;
+        if (!draft_tokens_materialized) {
+            materializeDraftTokensToCpu(B, P, draft_tokens);
+            draft_tokens_materialized = true;
+        }
 
         fillAllAllowBitmask(proc_mask);
         SpecLogitsProcessorRequest request;

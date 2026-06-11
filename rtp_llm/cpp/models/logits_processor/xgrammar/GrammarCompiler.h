@@ -47,12 +47,15 @@ struct GrammarReadyPayload {
 // enabled() reports false so callers learn at admission that grammar is unavailable.
 class GrammarCompiler {
 public:
-    // Build the backend + worker pool from cfg. Idempotent: only the first call
-    // wins. On any failure the singleton stays disabled (enabled() == false) so
-    // grammar requests are rejected early with a clear message. Registration of
-    // the logits-processor factory is done by the engine, not here, to keep the
-    // compiler free of any dependency on GrammarLogitsProcessor.
-    static void             initialize(const GrammarConfig& cfg) noexcept;
+    // Build the backend + worker pool from cfg. Idempotent on matching config.
+    // Throws std::runtime_error on re-init with a DIFFERENT config — silently
+    // keeping the first install would route a second model's grammar through
+    // the wrong tokenizer. On backend build failure the singleton stays
+    // disabled (enabled() == false) so grammar requests are rejected early
+    // with a clear message. Registration of the logits-processor factory is
+    // done by the engine, not here, to keep the compiler free of any
+    // dependency on GrammarLogitsProcessor.
+    static void             initialize(const GrammarConfig& cfg);
     static GrammarCompiler& instance();
     static void             resetForTest() noexcept;  // unit-test hook only
 
@@ -63,6 +66,7 @@ public:
 
     bool    enabled() const noexcept { return backend_ != nullptr; }
     int64_t compileTimeoutMs() const noexcept { return grammar_compile_timeout_ms_; }
+    int64_t maskWaitTimeoutMs() const noexcept { return mask_wait_timeout_ms_; }
 
     // Submit a compile request. A cache hit / cached-invalid returns an
     // already-ready future; a miss dedups onto (or starts) the in-flight compile
@@ -70,12 +74,10 @@ public:
     std::shared_future<GrammarReadyPayload> submit(const GrammarKeyCpp& key);
 
     // Build a fresh per-stream matcher around an already-compiled grammar.
-    // require_reasoning + think_end_token_ids enable the in-stream think-body
-    // gate; passthrough is no-op when require_reasoning is false (default).
+    // Reasoning / think-body gating is layered on top by the caller via
+    // ReasoningGate; the matcher itself is unaware of think semantics.
     std::unique_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                     bool                                       terminate_without_stop_token = false,
-                                                     bool                                       require_reasoning            = false,
-                                                     std::vector<int>                           think_end_token_ids          = {});
+                                                     bool terminate_without_stop_token = false);
 
     // Test-only: current depth of the pending-compile queue.
     size_t pendingTasks() const;
@@ -111,6 +113,7 @@ private:
     std::atomic<int>         alive_workers_{0};
 
     int64_t grammar_compile_timeout_ms_ = 60000;
+    int64_t mask_wait_timeout_ms_       = 5000;
 
     static std::mutex                       singleton_mutex_;
     static std::unique_ptr<GrammarCompiler> singleton_;

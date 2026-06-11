@@ -85,7 +85,7 @@ std::shared_ptr<XGrammarBackend> GrammarCompiler::buildBackend(const GrammarConf
     }
 }
 
-void GrammarCompiler::initialize(const GrammarConfig& cfg) noexcept {
+void GrammarCompiler::initialize(const GrammarConfig& cfg) {
     std::lock_guard<std::mutex> lock(singleton_mutex_);
     const size_t                fingerprint = grammarConfigFingerprint(cfg);
     if (initialized_) {
@@ -93,13 +93,21 @@ void GrammarCompiler::initialize(const GrammarConfig& cfg) noexcept {
             RTP_LLM_LOG_INFO("GrammarCompiler already initialized with matching config; ignoring re-init");
             return;
         }
+        // Reject silently keeping the first install: in a multi-model process
+        // (e.g. embed + chat hosted side-by-side) "old config wins" silently
+        // routes a new model's grammar requests through the wrong tokenizer,
+        // and the only symptom is schema-illegal tokens at sample time. Surface
+        // the misuse loudly so callers either resetForTest() or split into
+        // separate processes.
         RTP_LLM_LOG_ERROR(
             "GrammarCompiler: initialize() called again with a DIFFERENT grammar config "
             "(fingerprint 0x%zx vs first 0x%zx). Multiple engines with different grammar "
-            "configs in one process is unsupported; keeping the first installation.",
+            "configs in one process is unsupported.",
             fingerprint,
             config_fingerprint_.value_or(0));
-        return;
+        throw std::runtime_error(
+            "GrammarCompiler: re-initialize attempted with a different config; "
+            "multiple grammar configs in one process are unsupported");
     }
     auto backend = buildBackend(cfg);
     singleton_.reset(new GrammarCompiler(std::move(backend), cfg));
@@ -116,6 +124,15 @@ GrammarCompiler& GrammarCompiler::instance() {
         // NOT cache the returned reference across a possible initialize() — always
         // call instance() fresh — or they may keep pointing at this disabled stub.
         static GrammarCompiler disabled(nullptr, GrammarConfig());
+        // 只在第一次返回 stub 时打 warning：稳态下被反复调用会刷屏。生产环境
+        // 走到这里说明 initialize() 没跑（pybind 注入顺序错），是配置 bug 而不是
+        // 业务异常 —— 必须可见。
+        static std::once_flag warn_once;
+        std::call_once(warn_once, [] {
+            RTP_LLM_LOG_WARNING(
+                "GrammarCompiler::instance() returned disabled stub: initialize() was never called. "
+                "Grammar requests will be rejected at admission until the engine wires GrammarCompiler::initialize.");
+        });
         return disabled;
     }
     return *singleton_;
@@ -138,6 +155,9 @@ GrammarCompiler::GrammarCompiler(std::shared_ptr<XGrammarBackend> backend, const
     backend_(std::move(backend)) {
     if (cfg.compile_timeout_ms > 0) {
         grammar_compile_timeout_ms_ = cfg.compile_timeout_ms;
+    }
+    if (cfg.mask_wait_timeout_ms > 0) {
+        mask_wait_timeout_ms_ = cfg.mask_wait_timeout_ms;
     }
     if (!enabled()) {
         RTP_LLM_LOG_INFO("GrammarCompiler init: backend=disabled, compile_timeout_ms=%lld",
@@ -200,10 +220,23 @@ GrammarCompiler::~GrammarCompiler() {
 
     int stuck = alive_workers_.load();
     if (stuck > 0) {
+        // Detach instead of abort: graceful shutdown gets escalated to a hard
+        // crash if a single xgrammar compile takes longer than the timeout,
+        // which is a worse experience than letting the worker leak. The
+        // singleton is only ever destroyed at process exit (or in resetForTest
+        // under exclusive single-thread access), so the worker outliving us
+        // for a few seconds is harmless — the OS reaps it on _exit. If
+        // resetForTest gets called with a stuck worker we still want loud
+        // failure, but that path is test-only and has its own contract.
         RTP_LLM_LOG_ERROR("GrammarCompiler shutdown: %d worker(s) stuck in compileNow after %lld ms; "
-                          "aborting to avoid use-after-free on detached threads",
+                          "detaching and leaking until process exit",
                           stuck, static_cast<long long>(grammar_compile_timeout_ms_));
-        std::abort();
+        for (auto& t : workers_) {
+            if (t.joinable()) {
+                t.detach();
+            }
+        }
+        return;
     }
     for (auto& t : workers_) {
         if (t.joinable()) {
@@ -225,13 +258,8 @@ std::shared_future<GrammarReadyPayload> GrammarCompiler::makeReadyFuture(Grammar
 }
 
 std::unique_ptr<RtpGrammarMatcher> GrammarCompiler::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                                  bool                                       terminate_without_stop_token,
-                                                                  bool                                       require_reasoning,
-                                                                  std::vector<int>                           think_end_token_ids) {
-    return backend_->createMatcher(std::move(compiled),
-                                   terminate_without_stop_token,
-                                   require_reasoning,
-                                   std::move(think_end_token_ids));
+                                                                  bool terminate_without_stop_token) {
+    return backend_->createMatcher(std::move(compiled), terminate_without_stop_token);
 }
 
 std::shared_future<GrammarReadyPayload> GrammarCompiler::submit(const GrammarKeyCpp& key) {
@@ -258,7 +286,7 @@ std::shared_future<GrammarReadyPayload> GrammarCompiler::submit(const GrammarKey
         std::lock_guard<std::mutex> lock(queue_mutex_);
         auto it = in_flight_.find(kid);
         if (it != in_flight_.end() && it->second.valid()) {
-            RTP_LLM_LOG_DEBUG("grammar submit subscribed to in-flight: key=%s", key.brief().c_str());
+            RTP_LLM_LOG_INFO("grammar submit subscribed to in-flight: key=%s", key.brief().c_str());
             return it->second;
         }
     }
@@ -297,7 +325,7 @@ std::shared_future<GrammarReadyPayload> GrammarCompiler::submit(const GrammarKey
     if (submitted_new_task) {
         worker_cv_.notify_one();
     }
-    RTP_LLM_LOG_DEBUG("grammar submit %s: key=%s",
+    RTP_LLM_LOG_INFO("grammar submit %s: key=%s",
                       submitted_new_task ? "queued" : "subscribed to in-flight", key.brief().c_str());
     return future;
 }
@@ -346,7 +374,7 @@ void GrammarCompiler::workerLoop() {
         // permanently unfulfilled. Convert any escape into a system-error
         // payload so subscribers unblock and the worker keeps serving.
         try {
-            RTP_LLM_LOG_DEBUG("grammar worker picked up task: key=%s", popped->key.brief().c_str());
+            RTP_LLM_LOG_INFO("grammar worker picked up task: key=%s", popped->key.brief().c_str());
 
             const auto t_start = std::chrono::steady_clock::now();
 
@@ -386,11 +414,28 @@ void GrammarCompiler::workerLoop() {
         } catch (const std::future_error& fe) {
             RTP_LLM_LOG_WARNING("grammar worker set_value future_error: key=%s, what=%s",
                                 popped->key.brief().c_str(), fe.what());
+        } catch (const std::bad_alloc& e) {
+            // 资源型瞬时失败：不缓存，下一次相同 key 重新走 compile，避免把
+            // 内存压力固化成永久 invalid 状态。
+            RTP_LLM_LOG_ERROR("grammar worker task body bad_alloc (transient); not caching, key=%s",
+                              popped->key.brief().c_str());
+            try {
+                popped->promise.set_value({nullptr, false, false, std::string("grammar worker bad_alloc: ") + e.what(), 0});
+            } catch (const std::future_error&) {}
         } catch (const std::exception& e) {
-            RTP_LLM_LOG_ERROR("grammar worker task body threw (%s); reporting system error to subscribers: key=%s",
+            // 任务体内 setCache / 序列化等抛出的非资源型异常：把 key 标 invalid
+            // 缓存，避免后续相同 schema 反复重试触发 retry storm（subscribers
+            // 仍能从 promise 立即拿到错误）。
+            const std::string err = std::string("grammar worker exception: ") + e.what();
+            RTP_LLM_LOG_ERROR("grammar worker task body threw (%s); marking key invalid to suppress retry storm: key=%s",
                               e.what(), popped->key.brief().c_str());
             try {
-                popped->promise.set_value({nullptr, false, false, std::string("grammar worker exception: ") + e.what(), 0});
+                if (backend_) {
+                    backend_->setCacheInvalid(popped->key, err);
+                }
+            } catch (...) {}
+            try {
+                popped->promise.set_value({nullptr, true, false, err, 0});
             } catch (const std::future_error&) {}
         } catch (...) {
             RTP_LLM_LOG_ERROR("grammar worker task body threw unknown exception; key=%s", popped->key.brief().c_str());

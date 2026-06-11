@@ -177,7 +177,7 @@ class GenerateConfig(BaseModel):
     out_prefix: str = ""
     # for load balance
     role_addrs: List[RoleAddr] = []
-    trace_id: Optional[str] = None
+    trace_id: str = ""
 
     ignore_eos: bool = False
     skip_special_tokens: bool = False
@@ -212,7 +212,7 @@ class GenerateConfig(BaseModel):
 
     enable_remote_cache: bool = True
     # 是否强制相同 request_id 的 stream 在一批中调度
-    force_batch: Optional[bool] = None
+    force_batch: bool = False
     batch_group_timeout: Optional[int] = None  # ms
 
     unique_key: str = ""

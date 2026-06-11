@@ -530,6 +530,10 @@ bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
     return generate_status_->hasEvent(event);
 }
 
+bool GenerateStream::hasEventWithoutLock(StreamEvents::EventType event) const {
+    return generate_status_->hasEvent(event);
+}
+
 StreamState GenerateStream::getStatus() const {
     return generate_status_->getStatus();
 }
@@ -552,7 +556,7 @@ std::optional<StreamState> GenerateStream::pollLogitsProcessorPreparationWhileWa
         return std::nullopt;
     }
     // Do not let the readiness gate mask an error already reported (timeout, cancel, etc.).
-    if (hasError() || hasEvent(StreamEvents::Error)) {
+    if (hasError() || hasEventWithoutLock(StreamEvents::Error)) {
         preparation_pending_ = false;
         return std::nullopt;
     }
@@ -580,7 +584,7 @@ std::optional<StreamState> GenerateStream::pollLogitsProcessorPreparationWhileWa
         }
     }
     if (any_pending) {
-        if (hasError() || hasEvent(StreamEvents::Error)) {
+        if (hasError() || hasEventWithoutLock(StreamEvents::Error)) {
             preparation_pending_ = false;
             return std::nullopt;
         }

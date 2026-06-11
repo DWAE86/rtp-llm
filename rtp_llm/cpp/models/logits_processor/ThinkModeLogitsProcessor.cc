@@ -185,6 +185,12 @@ ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> 
     publishSpecSnapshotLocked();
 }
 
+// NOTE: this republishes a snapshot on every process()/updateStatus() tick rather than
+// only on actual state transitions. Consciously left as-is: the snapshot is a small
+// shared_ptr<ThinkModeSpecSnapshot> and the contained StringContainDFA copy is cheap
+// (a small KMP table); also only batch_size==1 && !beam paths populate `info`. A dirty-
+// flag refactor was reviewed and judged not worth the extra state — defer to a future
+// grammar performance pass if profiling ever lights this up.
 void ThinkModeLogitsProcessor::publishSpecSnapshotLocked() {
     auto snapshot      = std::make_shared<ThinkModeSpecSnapshot>();
     snapshot->version  = ++spec_snapshot_version_;

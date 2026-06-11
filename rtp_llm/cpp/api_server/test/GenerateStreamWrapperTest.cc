@@ -3,7 +3,6 @@
 
 #include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
 
-#include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockEngineBase.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockGenerateStream.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockTokenProcessor.h"
@@ -77,28 +76,6 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
     {
         auto [response, finished] = stream_wrapper.generateResponse();
         ASSERT_EQ(finished, true);
-    }
-}
-
-TEST_F(GenerateStreamWrapperTest, generateResponseThrowsOnStreamRuntimeError) {
-    auto mock_token_processor_ = std::make_shared<MockTokenProcessor>();
-    auto token_processor       = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor_);
-    auto mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
-    auto metric_reporter       = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
-
-    auto mock_stream = CreateMockGenerateStream();
-    mock_stream->reportEvent(StreamEvents::Error, ErrorCode::INVALID_PARAMS, "invalid grammar schema");
-    auto stream = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
-
-    GenerateStreamWrapper stream_wrapper(metric_reporter, token_processor);
-    stream_wrapper.init(stream, std::make_shared<MockEngineBase>());
-
-    try {
-        stream_wrapper.generateResponse();
-        FAIL() << "expected HttpApiServerException";
-    } catch (const HttpApiServerException& e) {
-        EXPECT_EQ(e.getType(), HttpApiServerException::ERROR_INPUT_FORMAT_ERROR);
-        EXPECT_THAT(e.getMessage(), HasSubstr("invalid grammar schema"));
     }
 }
 

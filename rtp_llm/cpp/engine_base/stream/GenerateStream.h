@@ -248,6 +248,11 @@ public:
     // 提供独立 API 仅为调用方意图更清晰（对应 reportError vs reportEvent 的命名分工）。
     void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
     bool         hasEvent(StreamEvents::EventType event) const;
+    // No-lock variant for callers that already hold mutex_ (e.g. moveToNext →
+    // pollLogitsProcessorPreparationWhileWaiting). hasEvent() locks mutex_
+    // unconditionally, so calling it under the same non-recursive lock would
+    // deadlock.
+    bool         hasEventWithoutLock(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     // See BaseLogitsProcessor.h ("Logits-processor readiness gate").
     bool         isPreparationPending() const noexcept { return preparation_pending_; }
@@ -470,8 +475,9 @@ public:
 
     // Post-construction init: set stream back-references on processors that
     // need it (e.g. GrammarLogitsProcessor for PD token replay) and inject the
-    // ErrorReporter callback (B5, dsv4-style decoupling). Must be called after
-    // make_shared so shared_from_this() is valid.
+    // ErrorReporter callback so processors can report errors without holding a
+    // raw stream pointer. Must be called after make_shared so shared_from_this()
+    // is valid.
     void initProcessorStreamRefs() {
         std::weak_ptr<GenerateStream> weak = shared_from_this();
         auto reporter = [weak](ErrorCode code, const std::string& msg, bool stream_lock_held) {

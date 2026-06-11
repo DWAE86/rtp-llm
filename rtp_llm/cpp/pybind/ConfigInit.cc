@@ -1148,6 +1148,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("constrained_json_disable_any_whitespace",
                        &GrammarConfig::constrained_json_disable_any_whitespace)
         .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
+        .def_readwrite("mask_wait_timeout_ms", &GrammarConfig::mask_wait_timeout_ms)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
@@ -1158,10 +1159,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.compile_timeout_ms,
                                       self.num_workers,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens);
+                                      self.override_stop_tokens,
+                                      self.mask_wait_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 6)
+                if (t.size() != 6 && t.size() != 7)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
@@ -1171,6 +1173,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.num_workers                             = t[3].cast<int>();
                     c.tokenizer_info_json                     = t[4].cast<std::string>();
                     c.override_stop_tokens                    = t[5].cast<std::vector<int32_t>>();
+                    if (t.size() >= 7) {
+                        c.mask_wait_timeout_ms = t[6].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
                 }

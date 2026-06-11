@@ -105,6 +105,10 @@ message GenerateConfigPB {
     IntMatrix banned_combo_token_ids = 59;
     // 0=unset(fallback to bool return_all_probs), 1=NONE, 2=DEFAULT, 3=ORIGINAL
     int32 return_all_probs_mode = 60;
+    // Field numbers 61-64 are intentionally skipped; grammar additions start
+    // at 65. Reserve them so a later commit can't accidentally reuse a tag
+    // and break wire compatibility with already-deployed binaries.
+    reserved 61 to 64;
     google.protobuf.StringValue json_schema = 65;
     google.protobuf.StringValue regex = 66;
     google.protobuf.StringValue ebnf = 67;

@@ -395,18 +395,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
             return;
         }
-        if (response.flatten_output().aux_info_size() > 0) {
-            const auto& aux = response.flatten_output().aux_info(0);
-            RTP_LLM_LOG_DEBUG(
-                "[pd_trace] pollRemoteOutput decode chunk request=%ld iter_count=%d "
-                "output_len=%d step_output_len=%d",
-                request_id,
-                aux.iter_count(),
-                aux.output_len(),
-                aux.step_output_len());
-        }
     }
-    RTP_LLM_LOG_DEBUG("[pd_trace] pollRemoteOutput done request=%ld", prefill_context.request_id);
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
 }

@@ -52,10 +52,12 @@ cc_library(
     name = "grammar_logits_processor",
     hdrs = [
         "GrammarLogitsProcessor.h",
+        "ReasoningGate.h",
     ],
     srcs = [
         "GrammarLogitsProcessor.cc",
         "GrammarModule.cc",
+        "ReasoningGate.cc",
     ],
     deps = [
         ":grammar_compiler",

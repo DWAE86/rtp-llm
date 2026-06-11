@@ -212,15 +212,22 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         std::shared_ptr<GenerateInput> input;
         auto                           err = prepareInput(request->inputs(i), input);
         if (!err.ok()) {
-            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
+            // prepareInput covers both QueryConverter (response_format / structured-output
+            // parsing → INVALID_PARAMS) and multimodal feature update; preserve the real
+            // ErrorCode via transErrorCodeToRPC instead of collapsing everything into
+            // UNKNOWN_ERROR + "multimodal processing failed", which mis-attributes a
+            // structured-output rejection as a multimodal fault.
+            const ErrorCodePB code_pb = transErrorCodeToRPC(err.code());
             for (int j = 0; j < batch_size; j++) {
                 auto* result = response->add_results();
                 auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
                 if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
+                    err_pb->set_error_code(code_pb);
+                    err_pb->set_error_message("prepareInput failed: " + err.ToString());
                 } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+                    err_pb->set_error_code(ErrorCodePB::CANCELLED);
+                    err_pb->set_error_message("batch aborted due to prepareInput failure at index "
+                                              + std::to_string(i));
                 }
             }
             return grpc::Status::OK;

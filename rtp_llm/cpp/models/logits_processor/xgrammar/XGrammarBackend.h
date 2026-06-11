@@ -107,9 +107,7 @@ public:
     // The shared_ptr<CompiledGrammar> inside keeps the compile alive past
     // any cache eviction.
     std::unique_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                     bool                                       terminate_without_stop_token = false,
-                                                     bool                                       require_reasoning            = false,
-                                                     std::vector<int>                           think_end_token_ids          = {});
+                                                     bool terminate_without_stop_token = false);
 
     void clear();
 

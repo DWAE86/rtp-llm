@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarCompiler.h"
+#include "rtp_llm/cpp/models/logits_processor/xgrammar/ReasoningGate.h"
 #include "rtp_llm/cpp/models/logits_processor/xgrammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
@@ -91,6 +92,7 @@ private:
     bool advanceMatcher(const std::vector<int32_t>& tokens, MatcherAdvance mode, bool caller_holds_stream_lock = false);
     void logGrammarLifecycle(const char* phase, const char* source, int64_t stream_id = -1) const;
     void installMatcher(GenerateStream& stream, const GrammarReadyPayload& payload);
+    bool inReasoningPassthrough() const noexcept;
 
     Kind        kind_      = Kind::Compile;
     ErrorCode   fail_code_ = ErrorCode::INVALID_PARAMS;
@@ -102,19 +104,24 @@ private:
     bool                                    resolved_ = false;
 
     // Reasoning gate inputs captured at admission. require_reasoning_ is true
-    // when the request started inside a think body; the matcher stays in
-    // PASSTHROUGH (allow-all mask, parser frozen) until think_end_token_ids_
-    // is observed in the token stream.
+    // when the request started inside a think body; the processor publishes a
+    // PASSTHROUGH (allow-all) mask and skips matcher advancement until the
+    // ReasoningGate observes think_end_token_ids_ in the token stream.
     bool             require_reasoning_   = false;
     std::vector<int> think_end_token_ids_;
 
     std::shared_ptr<RtpGrammarMatcher> matcher_;
+    std::unique_ptr<ReasoningGate>     reasoning_gate_;
     std::weak_ptr<GenerateStream>      stream_;
 
     mutable std::mutex          state_mutex_;
     std::condition_variable     state_cv_;
     std::atomic_bool            reported_error_{false};
     int64_t                     eos_token_id_              = 0;
+    // Total tokens advanced by the processor (matcher accepts + gate-passthrough
+    // observes). accepted_token_len_ reflects this; matcher_->numAcceptedTokens()
+    // alone would miss tokens consumed while the reasoning gate was passthrough.
+    int64_t                     total_advanced_              = 0;
     int64_t                     accepted_token_len_          = 0;
     int64_t                     pending_async_token_len_     = 0;
     std::optional<c10::Device>  last_mask_device_;

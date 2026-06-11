@@ -2,7 +2,7 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.utils.base_model_datatypes import AuxInfo
@@ -124,6 +124,11 @@ class GPTToolDefinition(BaseModel):
 
 
 class ResponseFormatJSONSchema(BaseModel):
+    # `schema` shadows BaseModel.schema() in pydantic v1 and triggers a v2
+    # protected_namespaces UserWarning. The OpenAI wire field is literally
+    # named "schema", so we keep the alias and silence the namespace.
+    model_config = ConfigDict(protected_namespaces=())
+
     name: Optional[str] = None
     schema: Optional[Dict[str, Any]] = None
     strict: Optional[bool] = None

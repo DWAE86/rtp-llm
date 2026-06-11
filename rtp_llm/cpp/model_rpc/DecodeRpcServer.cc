@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <mutex>
 #include <memory>
 #include <stdexcept>
@@ -111,57 +112,11 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
 
-    // Drive the stream through its preparation + KV-cache allocation cycle.
-    // moveToNext polls async preparation (e.g. grammar compile) while WAITING,
-    // then transitions through LOADING_CACHE for KV-cache allocation.
-    // Loop until the stream returns to WAITING (fully ready) or errors out.
-    {
-        const int64_t begin_time_us = currentTimeUs();
-        int64_t       max_wait_timeout_ms = decode_context.request_timeout_ms;
-        if (max_wait_timeout_ms <= 0 && maga_init_params_.grammar_config.compile_timeout_ms > 0) {
-            max_wait_timeout_ms = maga_init_params_.grammar_config.compile_timeout_ms;
-        }
-        if (max_wait_timeout_ms <= 0) {
-            max_wait_timeout_ms = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms;
-        }
-        const int64_t max_wait_timeout_us = max_wait_timeout_ms * 1000;
-
-        StreamState state = StreamState::WAITING;
-        while (!generate_stream->hasError()) {
-            state = generate_stream->moveToNext();
-            if (state == StreamState::WAITING) {
-                // Check if we went through LOADING_CACHE (KV allocated)
-                // or if preparation is still pending. If preparation is done
-                // and KV is loaded, we're ready to enqueue.
-                if (!generate_stream->isPreparationPending()
-                    && generate_stream->hasEvent(StreamEvents::LoadInitiated)) {
-                    break;
-                }
-            }
-            if (max_wait_timeout_ms > 0) {
-                const int64_t cost_time_us = currentTimeUs() - begin_time_us;
-                if (cost_time_us > max_wait_timeout_us) {
-                    RTP_LLM_LOG_WARNING("request [%s] decode allocate wait timeout after %ld ms (limit=%ld ms)",
-                                        decode_context.request_key.c_str(),
-                                        static_cast<long>(cost_time_us / 1000),
-                                        static_cast<long>(max_wait_timeout_ms));
-                    generate_stream->reportEvent(StreamEvents::Error,
-                                                 ErrorCode::WAIT_TO_RUN_TIMEOUT,
-                                                 "decode allocate wait timeout, limit is "
-                                                     + std::to_string(max_wait_timeout_ms) + " ms");
-                    break;
-                }
-            }
-            this_thread::sleep_for(chrono::milliseconds(1));
-        }
-    }
-    if (generate_stream->hasError()) {
-        const auto status_info = generate_stream->statusInfo();
-        string     error_msg   = "request: [" + decode_context.request_key
-                             + "] allocate resource failed at decode node: " + status_info.ToString();
+    if (auto wait_status = waitStreamReady(decode_context, generate_stream); wait_status.hasError()) {
+        const string error_msg = "request: [" + decode_context.request_key
+                                 + "] allocate resource failed at decode node: " + wait_status.ToString();
         RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status =
-            grpc::Status(transErrorCodeToGrpc(status_info.code()), error_msg);
+        decode_context.error_status = grpc::Status(transErrorCodeToGrpc(wait_status.code()), error_msg);
         return;
     }
 
@@ -171,6 +126,38 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
                       "failed to write allocate output");
 
     RTP_LLM_LOG_DEBUG("request [%s] allocate resource done", decode_context.request_key.c_str());
+}
+
+ErrorInfo DecodeRpcServer::waitStreamReady(const DecodeGenerateContext&           decode_context,
+                                           const std::shared_ptr<GenerateStream>& stream) {
+    // Wait budget must cover the slowest of the things that can park a stream
+    // here: grammar compile (when the request carries one) AND the configured
+    // prefill wait. A small client-supplied request_timeout_ms must not
+    // truncate grammar preparation, otherwise every grammar request from a
+    // short-deadline client times out before the singleton compiler can finish.
+    // Take the max instead of cascading fallbacks.
+    int64_t timeout_ms = decode_context.request_timeout_ms;
+    if (stream->isPreparationPending()) {
+        timeout_ms = std::max(timeout_ms, maga_init_params_.grammar_config.compile_timeout_ms);
+    }
+    timeout_ms = std::max(timeout_ms, maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms);
+    const int64_t deadline_us = currentTimeUs() + timeout_ms * 1000;
+
+    while (!stream->hasError()) {
+        if (stream->moveToNext() == StreamState::WAITING && !stream->isPreparationPending()
+            && stream->hasEvent(StreamEvents::LoadInitiated)) {
+            return ErrorInfo::OkStatus();
+        }
+        if (timeout_ms > 0 && currentTimeUs() > deadline_us) {
+            const std::string msg =
+                "decode allocate wait timeout, limit is " + std::to_string(timeout_ms) + " ms";
+            RTP_LLM_LOG_WARNING("request [%s] %s", decode_context.request_key.c_str(), msg.c_str());
+            stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, msg);
+            return stream->statusInfo();
+        }
+        this_thread::sleep_for(chrono::milliseconds(1));
+    }
+    return stream->statusInfo();
 }
 
 void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context) {

@@ -110,17 +110,23 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     }
     if (has_force) {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.forceSpAccept");
-        auto force_mask =
-            torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
+        // Build the mask on CPU and ship it to GPU once. Per-element writes via
+        // force_mask[idx] = true on a CUDA tensor lower to one H2D scalar copy
+        // per stream, which shows up as a string of tiny memcpys in profiles.
+        std::vector<uint8_t> force_mask_cpu(batch_size, 0);
         {
             int idx = 0;
             for (const auto& stream : streams) {
                 if (stream->forceSpAccept()) {
-                    force_mask[idx] = true;
+                    force_mask_cpu[idx] = 1;
                 }
                 idx++;
             }
         }
+        auto force_mask_host = torch::from_blob(force_mask_cpu.data(),
+                                                {batch_size},
+                                                torch::TensorOptions().dtype(torch::kBool)).clone();
+        auto force_mask = force_mask_host.to(target_device, /*non_blocking=*/true);
         auto target_bonus  = target_last_col.select(1, static_cast<int64_t>(propose_step_));
         auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus.unsqueeze(1)}, 1);
         auto force_mask_2d = force_mask.unsqueeze(1).expand_as(accept_tokens_d);

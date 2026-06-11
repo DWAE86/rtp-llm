@@ -98,10 +98,10 @@ public:
     // that don't need a stream reference.
     virtual void setStream(const std::shared_ptr<GenerateStream>& /*stream*/) {}
 
-    // ErrorReporter callback (B5, dsv4-style). Decouples processors from
-    // GenerateStream weak_ptr for error-up-the-stack: GenerateStream injects a
-    // callback that internally picks reportError vs reportErrorWithoutLock based
-    // on whether the caller already holds stream->mutex_.
+    // ErrorReporter callback. Decouples processors from GenerateStream weak_ptr
+    // for error-up-the-stack: GenerateStream injects a callback that internally
+    // picks reportError vs reportErrorWithoutLock based on whether the caller
+    // already holds stream->mutex_.
     //   stream_lock_held = true  -> calls reportErrorWithoutLock
     //   stream_lock_held = false -> calls reportError (acquires mutex_)
     // The callback is no-op if the stream is gone (weak_ptr expired).
