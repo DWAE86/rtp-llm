@@ -79,6 +79,7 @@ class KvcmEventPublisherTest {
     private static final class Peer implements KvcmEventPublisher.Transport {
         final List<JsonNode> requests = new CopyOnWriteArrayList<>();
         final Set<Long> keys = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        final AtomicBoolean rejectRegistration = new AtomicBoolean();
         final AtomicBoolean rejectHeartbeat = new AtomicBoolean();
         final AtomicBoolean loseSnapshotAck = new AtomicBoolean();
         final AtomicBoolean loseMutationAck = new AtomicBoolean();
@@ -86,7 +87,7 @@ class KvcmEventPublisherTest {
         @Override public boolean post(String route, String body) throws Exception {
             JsonNode root = JSON.readTree(body);
             requests.add(root);
-            if (route.equals("/api/registerInstance")) return true;
+            if (route.equals("/api/registerInstance")) return !rejectRegistration.getAndSet(false);
             for (JsonNode event : root.path("events")) {
                 String type = event.path("event_type").asText();
                 switch (type) {
@@ -221,12 +222,19 @@ class KvcmEventPublisherTest {
         var cache = new MockLruBlockCache(16);
         cache.admit(List.of(1L));
         var peer = new Peer();
+        peer.rejectRegistration.set(true);
         try (var publisher = new KvcmEventPublisher(config(64), cache, "host:61000", 128, () -> true, peer)) {
             publisher.start();
             until(() -> peer.keys.equals(Set.of(1L)) && publisher.status().get("state").equals("READY"));
             assertEquals("test-group", peer.requests.get(0).path("instance_group").asText());
             assertEquals(128, peer.requests.get(0).path("block_size").asInt());
-            assertEquals("EVENT_NODE_REGISTER", peer.requests.get(1).path("events").path(0).path("event_type").asText());
+            var registrations = peer.requests.stream().filter(root -> root.has("instance_group")).toList();
+            assertEquals(2, registrations.size());
+            for (JsonNode registration : registrations) {
+                assertTrue(registration.path("disable_write_session").isBoolean());
+                assertTrue(registration.path("disable_write_session").asBoolean());
+            }
+            assertEquals(1, peer.events("EVENT_NODE_REGISTER").size());
             cache.admit(List.of(2L, Long.MIN_VALUE));
             until(() -> peer.keys.equals(Set.of(1L, 2L, Long.MIN_VALUE)));
             cache.evict(List.of(2L));

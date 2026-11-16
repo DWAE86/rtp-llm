@@ -439,6 +439,7 @@ final class KvcmEventPublisher implements AutoCloseable {
         ObjectNode root = JSON.createObjectNode();
         root.put("trace_id", trace()).put("instance_group", config.group()).put("instance_id", instanceId)
                 .put("block_size", blockSize).put("default_query_type", "QT_PREFIX_MATCH");
+        root.put("disable_write_session", true);
         var metadata = config.metadata();
         root.putObject("model_deployment").put("model_name", config.model()).put("dtype", metadata.dtype())
                 .put("use_mla", metadata.useMla()).put("tp_size", metadata.tp()).put("dp_size", metadata.dp()).put("pp_size", metadata.pp());
